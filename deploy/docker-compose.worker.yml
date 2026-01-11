@@ -7,9 +7,14 @@ services:
     container_name: datanode
     ports:
       - "9864:9864"
+      - "9866:9866"
+      - "9867:9867"
     environment:
       - CORE_CONF_fs_defaultFS=hdfs://192.168.55.114:9000
       - HDFS_CONF_dfs_replication=2
+      - HDFS_CONF_dfs_datanode_address=0.0.0.0:9866
+      - HDFS_CONF_dfs_datanode_http_address=0.0.0.0:9864
+      - HDFS_CONF_dfs_datanode_ipc_address=0.0.0.0:9867
     volumes:
       - datanode_data:/hadoop/dfs/data
     networks:

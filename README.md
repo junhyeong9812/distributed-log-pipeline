@@ -1035,3 +1035,80 @@ http://192.168.55.114:8082
 | Airflow | http://192.168.55.114:8084 | 배치 작업 스케줄링 |
 | Grafana | http://192.168.55.114:3000 | 메트릭 대시보드 |
 | Prometheus | http://192.168.55.114:9090 | 메트릭 수집/쿼리 |
+
+---
+
+### 분산 환경 트러블슈팅
+
+#### 문제: DataNode가 NameNode에 연결 안 됨
+
+**증상:**
+```bash
+docker exec namenode hdfs dfsadmin -report
+# Live datanodes (0) - DataNode가 없음
+```
+
+**Worker 로그 에러:**
+```
+ERROR datanode.DataNode: Initialization failed for Block pool...
+Datanode denied communication with namenode because hostname cannot be resolved
+(ip=192.168.55.158, hostname=192.168.55.158)
+```
+
+**원인:**
+- NameNode가 DataNode의 IP를 호스트명으로 역방향 DNS 조회 시도
+- 호스트명 해석 실패로 연결 거부
+
+**해결:**
+docker-compose.master.yml의 namenode 설정에 추가:
+```yaml
+namenode:
+  environment:
+    # 기존 설정...
+    - HDFS_CONF_dfs_namenode_datanode_registration_ip___hostname___check=false
+```
+
+> 참고: 환경변수에서 `.`은 `_`로, `-`는 `___`로 변환됨
+> `dfs.namenode.datanode.registration.ip-hostname-check` → `HDFS_CONF_dfs_namenode_datanode_registration_ip___hostname___check`
+
+**적용:**
+```bash
+# Master 재시작
+docker compose -f docker-compose.master.yml down
+docker compose -f docker-compose.master.yml up -d
+
+# Worker 재시작
+docker compose -f docker-compose.worker.yml down
+docker compose -f docker-compose.worker.yml up -d
+```
+
+**확인:**
+```bash
+docker exec namenode hdfs dfsadmin -report
+# Live datanodes (2) 확인
+```
+
+---
+
+#### 문제: Worker 포트 충돌
+
+**증상:**
+```
+Error response from daemon: Bind for 0.0.0.0:8081 failed: port is already allocated
+```
+
+**원인:**
+- Worker PC에서 8081 포트가 이미 사용 중
+
+**해결:**
+docker-compose.worker.yml에서 포트 변경:
+```yaml
+spark-worker:
+  ports:
+    - "10000:8081"   # 외부 포트를 10000으로 변경
+```
+
+또는 명령어로:
+```bash
+sed -i 's/8081:8081/10000:8081/' docker-compose.worker.yml
+```
