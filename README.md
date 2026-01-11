@@ -1112,3 +1112,312 @@ spark-worker:
 ```bash
 sed -i 's/8081:8081/10000:8081/' docker-compose.worker.yml
 ```
+
+---
+
+#### 문제: Spark에서 HDFS DataNode 연결 실패
+
+**증상:**
+```
+WARN DataStreamer: Exception in createBlockOutputStream
+java.net.ConnectException: Connection refused
+WARN DataStreamer: Excluding datanode DatanodeInfoWithStorage[192.168.55.9:9866...]
+ERROR: File could only be written to 0 of the 1 minReplication nodes.
+There are 2 datanode(s) running and 2 node(s) are excluded in this operation.
+```
+
+**원인:**
+- NameNode ↔ DataNode 통신은 정상 (메타데이터)
+- Spark → DataNode 직접 데이터 쓰기 시 9866 포트 필요
+- Worker의 docker-compose에서 9866 포트가 노출되지 않음
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    데이터 흐름                               │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  [NameNode] ←──── 메타데이터 ────→ [DataNode]               │
+│      ↑              (정상)            :9866                  │
+│      │                                  ↑                    │
+│  메타데이터                              │                    │
+│   조회                            Connection refused         │
+│      │                                  │                    │
+│  [Spark] ─────── 데이터 쓰기 ───────────┘                    │
+│                  (포트 미노출)                               │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**해결:**
+docker-compose.worker.yml에서 DataNode 포트 추가 노출:
+```yaml
+datanode:
+  image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+  container_name: datanode
+  ports:
+    - "9864:9864"   # HTTP (Web UI)
+    - "9866:9866"   # 데이터 전송 ← 필수!
+    - "9867:9867"   # IPC
+  environment:
+    - CORE_CONF_fs_defaultFS=hdfs://192.168.55.114:9000
+    - HDFS_CONF_dfs_replication=2
+    - HDFS_CONF_dfs_datanode_address=0.0.0.0:9866
+    - HDFS_CONF_dfs_datanode_http_address=0.0.0.0:9864
+    - HDFS_CONF_dfs_datanode_ipc_address=0.0.0.0:9867
+```
+
+**DataNode 포트 설명:**
+
+| 포트 | 용도 | 필수 여부 |
+|------|------|----------|
+| 9864 | Web UI (HTTP) | 선택 |
+| 9866 | 데이터 전송 | **필수** |
+| 9867 | IPC 통신 | 권장 |
+
+**적용:**
+```bash
+# Worker에서 실행 (리눅스 A, B 둘 다)
+docker compose -f docker-compose.worker.yml down
+docker compose -f docker-compose.worker.yml up -d
+```
+
+**확인:**
+```bash
+# 포트 노출 확인
+docker compose -f docker-compose.worker.yml ps
+# 9866 포트가 보여야 함
+```
+
+---
+
+### 분산 환경 HDFS 트러블슈팅 요약
+
+분산 환경에서 HDFS 구성 시 발생할 수 있는 문제들입니다.
+
+#### 문제 1: DataNode가 NameNode에 등록 실패
+
+**증상:**
+```bash
+docker exec namenode hdfs dfsadmin -report
+# Live datanodes (0) - DataNode가 없음
+```
+
+**Worker 로그:**
+```
+ERROR datanode.DataNode: Initialization failed for Block pool...
+Datanode denied communication with namenode because hostname cannot be resolved
+(ip=192.168.55.158, hostname=192.168.55.158)
+```
+
+**원인:**
+- NameNode가 DataNode의 IP를 호스트명으로 역방향 DNS 조회 시도
+- 분산 환경에서 DNS 서버가 없으면 호스트명 해석 실패
+
+**해결:**
+docker-compose.master.yml의 namenode에 설정 추가:
+```yaml
+namenode:
+  environment:
+    # 기존 설정...
+    - HDFS_CONF_dfs_namenode_datanode_registration_ip___hostname___check=false
+```
+
+> 환경변수 변환 규칙:
+> - `.` → `_`
+> - `-` → `___`
+> - `dfs.namenode.datanode.registration.ip-hostname-check`
+> - → `HDFS_CONF_dfs_namenode_datanode_registration_ip___hostname___check`
+
+---
+
+#### 문제 2: Spark에서 DataNode 연결 실패
+
+**증상:**
+```
+WARN DataStreamer: Exception in createBlockOutputStream
+java.net.ConnectException: Connection refused
+WARN DataStreamer: Excluding datanode DatanodeInfoWithStorage[192.168.55.9:9866...]
+ERROR: File could only be written to 0 of the 1 minReplication nodes.
+There are 2 datanode(s) running and 2 node(s) are excluded in this operation.
+```
+
+**원인:**
+- NameNode ↔ DataNode 메타데이터 통신은 정상
+- Spark → DataNode 직접 데이터 쓰기 시 9866 포트 필요
+- Worker의 docker-compose에서 9866 포트가 노출되지 않음
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    HDFS 데이터 흐름                          │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  [Client/Spark]                                              │
+│       │                                                      │
+│       │ 1. 파일 생성 요청                                    │
+│       ▼                                                      │
+│  [NameNode]                                                  │
+│       │                                                      │
+│       │ 2. DataNode 위치 반환                                │
+│       ▼                                                      │
+│  [Client/Spark]                                              │
+│       │                                                      │
+│       │ 3. DataNode에 직접 데이터 쓰기 (:9866)              │
+│       ▼                                                      │
+│  [DataNode] ← 여기서 Connection refused 발생                │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**해결:**
+docker-compose.worker.yml에서 DataNode 포트 추가:
+```yaml
+datanode:
+  ports:
+    - "9864:9864"   # HTTP (Web UI)
+    - "9866:9866"   # 데이터 전송 ← 필수!
+    - "9867:9867"   # IPC
+  environment:
+    - HDFS_CONF_dfs_datanode_address=0.0.0.0:9866
+    - HDFS_CONF_dfs_datanode_http_address=0.0.0.0:9864
+    - HDFS_CONF_dfs_datanode_ipc_address=0.0.0.0:9867
+```
+
+---
+
+#### 문제 3: Worker 포트 충돌
+
+**증상:**
+```
+Error response from daemon: Bind for 0.0.0.0:8081 failed: port is already allocated
+```
+
+**원인:**
+- Worker PC에서 8081 포트가 이미 사용 중
+
+**해결:**
+docker-compose.worker.yml에서 포트 변경:
+```yaml
+spark-worker:
+  ports:
+    - "10000:8081"   # 외부 포트를 10000으로 변경
+```
+
+---
+
+#### 분산 환경 체크리스트
+
+| 항목 | Master 설정 | Worker 설정 |
+|------|------------|-------------|
+| **hostname 체크 비활성화** | `HDFS_CONF_dfs_namenode_datanode_registration_ip___hostname___check=false` | - |
+| **DataNode 데이터 포트** | - | `ports: 9866:9866` |
+| **DataNode 주소 바인딩** | - | `HDFS_CONF_dfs_datanode_address=0.0.0.0:9866` |
+| **NameNode 주소** | `CORE_CONF_fs_defaultFS=hdfs://192.168.55.114:9000` | `CORE_CONF_fs_defaultFS=hdfs://192.168.55.114:9000` |
+
+#### 연결 확인 명령어
+```bash
+# 1. DataNode 등록 확인 (Master에서)
+docker exec namenode hdfs dfsadmin -report
+
+# 2. HDFS 파일 쓰기 테스트 (Master에서)
+docker exec namenode hdfs dfs -mkdir -p /test
+docker exec namenode hdfs dfs -touchz /test/hello.txt
+docker exec namenode hdfs dfs -ls /test
+
+# 3. Spark Worker 확인
+http://192.168.55.114:8082
+```
+
+---
+
+#### 문제 4: Docker 네트워크 격리로 인한 연결 문제
+
+**증상:**
+```
+WARN DataStreamer: Exception in createBlockOutputStream
+java.io.EOFException: Unexpected EOF while trying to read response from server
+WARN TaskSchedulerImpl: Initial job has not accepted any resources; 
+check your cluster UI to ensure that workers are registered and have sufficient resources
+```
+
+**원인:**
+- Docker 기본 bridge 네트워크는 컨테이너를 격리함
+- Master와 Worker가 서로 다른 PC에 있을 때 Docker 내부 IP로 통신 시도
+- DataNode/Spark Worker가 내부 IP(172.x.x.x)를 Master에 보고
+- Master가 해당 내부 IP로 접근 시도 → 실패
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   네트워크 문제 상황                          │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  Master (192.168.55.114)                                     │
+│       │                                                      │
+│       │ DataNode 위치 조회                                   │
+│       ▼                                                      │
+│  NameNode: "DataNode는 172.19.0.3:9866에 있어"              │
+│       │                                                      │
+│       │ 172.19.0.3:9866 접근 시도                           │
+│       ▼                                                      │
+│  ❌ 실패 (172.x.x.x는 Worker PC 내부 Docker IP)             │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**해결:**
+Worker의 docker-compose.worker.yml에서 `network_mode: host` 사용:
+```yaml
+services:
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://192.168.55.114:9000
+      - HDFS_CONF_dfs_replication=2
+      - HDFS_CONF_dfs_datanode_address=0.0.0.0:9866
+      - HDFS_CONF_dfs_datanode_http_address=0.0.0.0:9864
+      - HDFS_CONF_dfs_datanode_ipc_address=0.0.0.0:9867
+      - HDFS_CONF_dfs_datanode_use_datanode_hostname=false
+      - HDFS_CONF_dfs_client_use_datanode_hostname=false
+    volumes:
+      - datanode_data:/hadoop/dfs/data
+    network_mode: host    # ← 핵심!
+
+  spark-worker:
+    image: bde2020/spark-worker:3.3.0-hadoop3.3
+    container_name: spark-worker
+    environment:
+      - SPARK_MASTER=spark://192.168.55.114:7077
+    volumes:
+      - ./spark-jobs:/opt/spark-jobs
+    network_mode: host    # ← 핵심!
+
+volumes:
+  datanode_data:
+```
+
+**network_mode: host 설명:**
+
+| 모드 | 설명 | IP 예시 |
+|------|------|---------|
+| bridge (기본) | Docker 가상 네트워크 사용 | 172.19.0.3 |
+| host | 호스트 네트워크 직접 사용 | 192.168.55.158 |
+
+**주의사항:**
+- `network_mode: host` 사용 시 `ports` 설정 불필요 (충돌 발생)
+- 컨테이너가 호스트의 모든 포트에 직접 바인딩됨
+- Linux에서만 지원 (Mac/Windows 미지원)
+
+**적용:**
+```bash
+# Worker에서 실행 (리눅스 A, B 둘 다)
+docker compose -f docker-compose.worker.yml down
+docker compose -f docker-compose.worker.yml up -d
+```
+
+**확인:**
+```bash
+# Master에서 DataNode 확인
+docker exec namenode hdfs dfsadmin -report
+# Live datanodes에 실제 IP(192.168.55.x)가 보여야 함
+
+# Spark UI에서 Worker 확인
+http://192.168.55.114:8082
+# Workers에 실제 IP가 보여야 함
+```
