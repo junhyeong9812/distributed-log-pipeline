@@ -542,3 +542,242 @@ A: Master 8GB RAM, Worker 각 4GB RAM을 권장합니다. 더 낮은 사양에�
 
 ### Q: Windows에서도 가능한가요?
 A: WSL2 + Docker Desktop 환경에서 가능합니다. 단, 네트워크 설정이 복잡해질 수 있습니다.
+---
+
+## 🔧 기술 상세 설명
+
+### PySpark는 어떻게 동작하나요?
+
+Spark는 Java/Scala로 만들어졌지만, Python으로 작성한 코드도 실행할 수 있습니다.
+
+#### 동작 구조
+```
+┌─────────────────────────────────────────────────────────┐
+│                    PySpark 구조                          │
+├─────────────────────────────────────────────────────────┤
+│                                                          │
+│   Python 코드 (우리가 작성)                               │
+│        ↓                                                 │
+│   Py4J (Python ↔ Java 브릿지)                            │
+│        ↓                                                 │
+│   Spark Core (Java/Scala - 실제 실행)                    │
+│        ↓                                                 │
+│   JVM에서 분산 처리                                       │
+│                                                          │
+└─────────────────────────────────────────────────────────┘
+```
+
+#### 실제 실행 흐름
+```python
+# 우리가 작성한 Python 코드
+df.filter(col("level") == "ERROR").count()
+```
+
+위 코드가 실행되면:
+
+1. **Python → Py4J**: Python 코드가 Py4J 라이브러리를 통해 Java로 전달
+2. **실행 계획 생성**: Spark(Java)가 최적화된 실행 계획 생성
+3. **JVM 분산 처리**: 실제 데이터 처리는 JVM에서 분산 실행
+4. **결과 반환**: 처리 결과만 Python으로 반환
+
+#### 성능 비교
+
+| 구분 | PySpark | Scala/Java Spark |
+|------|---------|------------------|
+| **DataFrame API** | 거의 동일 | 기준 |
+| **RDD 연산** | 약간 느림 | 빠름 |
+| **UDF (사용자 함수)** | 느림 (직렬화 오버헤드) | 빠름 |
+| **개발 속도** | 빠름 | 느림 |
+
+#### 언제 무엇을 선택할까?
+```
+DataFrame/SQL 위주 작업     → PySpark 추천 (충분한 성능)
+복잡한 커스텀 로직/UDF 많음  → Scala 고려
+ML 파이프라인               → PySpark (MLlib + Python 생태계)
+```
+
+본 프로젝트는 DataFrame API 위주로 작업하므로 **PySpark로 충분**합니다.
+
+---
+
+### Kafka 토픽 파티션 설정 주의사항
+
+#### 문제 상황
+
+Kafka 토픽이 의도한 파티션 수와 다르게 생성될 수 있습니다.
+```
+예상: 파티션 3개로 분산 저장
+실제: 파티션 1개에 모든 데이터 저장
+```
+
+#### 원인
+```
+┌─────────────────────────────────────────────────────────┐
+│              서비스 시작 순서 문제                        │
+├─────────────────────────────────────────────────────────┤
+│                                                          │
+│  Case 1: Generator가 먼저 데이터 전송                    │
+│  → Kafka가 토픽 자동 생성 (AUTO_CREATE_TOPICS=true)      │
+│  → 기본값 파티션 1개로 생성                              │
+│  → Java Backend의 KafkaConfig 설정 무시됨               │
+│                                                          │
+│  Case 2: Java Backend가 먼저 연결                        │
+│  → KafkaConfig.java의 NewTopic 설정 적용                │
+│  → 파티션 3개로 토픽 생성                                │
+│  → 데이터가 정상적으로 분산 저장                         │
+│                                                          │
+└─────────────────────────────────────────────────────────┘
+```
+
+#### 해결 방법
+
+**방법 1: 서비스 시작 순서 보장**
+```yaml
+# docker-compose.yml
+generator:
+  depends_on:
+    backend:
+      condition: service_healthy  # Backend가 healthy 상태일 때만 시작
+```
+
+**방법 2: 토픽 사전 생성**
+```bash
+# Kafka 컨테이너에서 직접 토픽 생성
+docker exec kafka /opt/kafka/bin/kafka-topics.sh \
+  --create \
+  --topic logs.raw \
+  --partitions 3 \
+  --replication-factor 1 \
+  --bootstrap-server localhost:9092
+```
+
+**방법 3: 볼륨 초기화 후 재시작**
+```bash
+docker compose down -v  # 볼륨까지 삭제
+docker compose up -d    # 새로 시작
+```
+
+#### 파티션 분배 원리
+```java
+// KafkaProducerService.java
+String key = logEvent.getService();  // key = service 이름
+kafkaTemplate.send(logsTopic, key, logEvent);
+```
+
+| Key (Service) | 파티션 할당 (hash % 파티션수) |
+|---------------|------------------------------|
+| api-gateway | 0, 1, 또는 2 |
+| user-service | 0, 1, 또는 2 |
+| order-service | 0, 1, 또는 2 |
+
+**같은 key는 항상 같은 파티션**으로 전송되어 메시지 순서가 보장됩니다.
+
+---
+
+### Spark Streaming 파티션 저장 문제 해결
+
+#### 문제 현상
+
+HDFS에 데이터가 저장될 때 파티션이 제대로 생성되지 않는 문제:
+```
+# 예상한 결과
+/data/logs/raw/year=2026/month=1/day=11/hour=19/
+
+# 실제 결과
+/data/logs/raw/year=__HIVE_DEFAULT_PARTITION__/month=__HIVE_DEFAULT_PARTITION__/...
+```
+
+#### 원인
+
+Generator가 보내는 timestamp 형식과 Spark에서 파싱하는 형식이 불일치:
+```python
+# Generator가 보내는 형식 (Unix timestamp)
+{
+    "timestamp": 1768123166.291045000,  # epoch seconds
+    ...
+}
+
+# 처음 Spark 코드 (ISO 형식으로 파싱 시도)
+.withColumn("event_time", to_timestamp(col("timestamp"), "yyyy-MM-dd'T'HH:mm:ss.SSSXXX"))
+# → 파싱 실패 → null → __HIVE_DEFAULT_PARTITION__
+```
+
+#### 해결
+
+Unix timestamp를 올바르게 파싱하도록 수정:
+```python
+# 수정 전 (ISO 형식)
+.withColumn("event_time", to_timestamp(col("timestamp"), "yyyy-MM-dd'T'HH:mm:ss.SSSXXX"))
+
+# 수정 후 (Unix timestamp)
+.withColumn("event_time", from_unixtime(col("timestamp")).cast("timestamp"))
+```
+
+또한 스키마에서 timestamp 타입도 변경:
+```python
+# 수정 전
+StructField("timestamp", StringType(), True)
+
+# 수정 후
+StructField("timestamp", DoubleType(), True)
+```
+
+#### 디버깅 방법
+```bash
+# 1. Generator가 보내는 실제 데이터 형식 확인
+curl -s http://<MASTER_IP>:8000/sample/log
+
+# 2. Kafka UI에서 메시지 직접 확인
+# http://<MASTER_IP>:8080 → Topics → logs.raw → Messages
+```
+
+---
+
+### Spark Job 리소스 점유 문제
+
+#### 문제 현상
+
+Spark Job 재실행 시 리소스를 할당받지 못하는 경고:
+```
+WARN TaskSchedulerImpl: Initial job has not accepted any resources; 
+check your cluster UI to ensure that workers are registered and have sufficient resources
+```
+
+#### 원인
+
+이전 Spark Job이 비정상 종료되면서 Worker의 리소스를 계속 점유하고 있음.
+```
+┌─────────────────────────────────────────────────────────┐
+│                   리소스 점유 상태                        │
+├─────────────────────────────────────────────────────────┤
+│                                                          │
+│  이전 Job (종료됨)     현재 Job (대기중)                  │
+│  └─ Worker 리소스 점유  └─ 리소스 할당 대기               │
+│     (24 cores, 1GB)       (할당 불가)                    │
+│                                                          │
+└─────────────────────────────────────────────────────────┘
+```
+
+#### 해결 방법
+
+**방법 1: Spark 컨테이너 재시작**
+```bash
+docker compose restart spark-master spark-worker
+```
+
+**방법 2: Spark Master UI에서 직접 종료**
+```
+1. http://<MASTER_IP>:8082 접속
+2. Running Applications에서 (kill) 클릭
+3. 새 Job 실행
+```
+
+**방법 3: 전체 클러스터 재시작**
+```bash
+docker compose down
+docker compose up -d
+```
+
+#### 예방 방법
+
+Spark Job 종료 시 항상 `Ctrl+C`로 정상 종료하고, Spark UI에서 Application이 Completed로 변경되었는지 확인.
