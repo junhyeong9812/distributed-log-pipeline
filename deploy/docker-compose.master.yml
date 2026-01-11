@@ -77,7 +77,7 @@ services:
       - CORE_CONF_hadoop_http_staticuser_user=root
       - HDFS_CONF_dfs_webhdfs_enabled=true
       - HDFS_CONF_dfs_permissions_enabled=false
-      - HDFS_CONF_dfs_replication=2
+      - HDFS_CONF_dfs_replication=1
       - HDFS_CONF_dfs_namenode_datanode_registration_ip___hostname___check=false
     volumes:
       - namenode_data:/hadoop/dfs/name

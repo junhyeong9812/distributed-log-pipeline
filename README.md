@@ -1678,3 +1678,155 @@ docker exec namenode hdfs dfsadmin -report
 | **다른 Worker IP 등록** | - | worker2 IP | worker1 IP |
 | **network_mode** | host (spark-master만) | host | host |
 | **Spark Job IP 사용** | 192.168.55.114 | - | - |
+
+---
+
+#### 문제 11: Spark Worker IPv6 호스트명 해석 실패
+
+**증상:**
+```
+ERROR SparkUncaughtExceptionHandler: Uncaught exception in thread Thread[main,5,main]
+java.net.UnknownHostException: jun: jun: Try again
+    at java.net.InetAddress.getLocalHost(InetAddress.java:1507)
+    at org.apache.spark.util.Utils$.findLocalInetAddress(Utils.scala:1047)
+Caused by: java.net.UnknownHostException: jun: Try again
+    at java.net.Inet6AddressImpl.lookupAllHostAddr(Native Method)
+```
+
+**원인:**
+- Spark Worker가 시작 시 자신의 호스트명을 IP로 해석 시도
+- Java가 기본적으로 IPv6(`Inet6AddressImpl`)로 먼저 조회
+- `/etc/hosts`에 호스트명이 있어도 IPv6 조회 실패로 에러 발생
+- `network_mode: host` 환경에서 발생
+
+**해결:**
+docker-compose에서 IPv4 강제 사용 및 로컬 IP 명시적 지정:
+```yaml
+spark-worker:
+  image: bde2020/spark-worker:3.3.0-hadoop3.3
+  container_name: spark-worker
+  environment:
+    - SPARK_MASTER=spark://192.168.55.114:7077
+    - SPARK_LOCAL_IP=192.168.55.158           # 자신의 IP 명시
+    - SPARK_WORKER_OPTS=-Djava.net.preferIPv4Stack=true  # IPv4 강제
+  network_mode: host
+```
+
+**핵심 설정:**
+
+| 환경변수 | 설명 |
+|----------|------|
+| `SPARK_LOCAL_IP` | Worker의 IP를 명시적으로 지정 |
+| `SPARK_WORKER_OPTS=-Djava.net.preferIPv4Stack=true` | Java가 IPv4만 사용하도록 강제 |
+
+**Worker별 설정 예시:**
+
+Worker 1 (192.168.55.158):
+```yaml
+environment:
+  - SPARK_LOCAL_IP=192.168.55.158
+  - SPARK_WORKER_OPTS=-Djava.net.preferIPv4Stack=true
+```
+
+Worker 2 (192.168.55.9):
+```yaml
+environment:
+  - SPARK_LOCAL_IP=192.168.55.9
+  - SPARK_WORKER_OPTS=-Djava.net.preferIPv4Stack=true
+```
+
+**성공 로그:**
+```
+INFO Worker: Starting Spark worker 192.168.55.158:37273 with 6 cores, 14.5 GiB RAM
+INFO Worker: Connecting to master 192.168.55.114:7077...
+INFO Worker: Successfully registered with master spark://192.168.55.114:7077
+```
+
+---
+
+#### 문제 12: DataNode 간 블록 복제 실패
+
+**증상:**
+```
+WARN DataStreamer: Exception in createBlockOutputStream blk_xxx
+java.io.IOException: Got error, status=ERROR, status message , ack with firstBadLink as 192.168.55.9:9866
+WARN DataStreamer: Abandoning BP-xxx:blk_xxx
+WARN DataStreamer: Excluding datanode DatanodeInfoWithStorage[192.168.55.9:9866...]
+```
+
+또는:
+```
+java.io.EOFException: Unexpected EOF while trying to read response from server
+    at org.apache.hadoop.hdfs.protocolPB.PBHelperClient.vintPrefixed
+    at org.apache.hadoop.hdfs.DataStreamer.createBlockOutputStream
+```
+
+**원인:**
+- HDFS 복제 팩터가 2로 설정됨
+- 블록을 쓸 때 첫 번째 DataNode에서 두 번째 DataNode로 복제 시도
+- DataNode 간 네트워크 통신 문제로 복제 실패
+- 분산 환경에서 Docker 컨테이너 간 네트워크 격리 문제
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   블록 복제 흐름                             │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  Client (Spark)                                              │
+│       │                                                      │
+│       │ 1. 블록 쓰기 요청                                    │
+│       ▼                                                      │
+│  DataNode 1 (192.168.55.158)                                │
+│       │                                                      │
+│       │ 2. 복제 팩터=2이므로 다른 DataNode로 복제 시도       │
+│       ▼                                                      │
+│  DataNode 2 (192.168.55.9)                                  │
+│       │                                                      │
+│       ❌ 연결 실패 (네트워크 격리)                           │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**해결:**
+복제 팩터를 1로 변경하여 DataNode 간 복제를 비활성화:
+
+Master docker-compose.master.yml:
+```yaml
+namenode:
+  environment:
+    - HDFS_CONF_dfs_replication=1   # 2 → 1로 변경
+```
+
+Worker docker-compose.worker1.yml, docker-compose.worker2.yml:
+```yaml
+datanode:
+  environment:
+    - HDFS_CONF_dfs_replication=1   # 2 → 1로 변경
+```
+
+**복제 팩터 설명:**
+
+| 복제 팩터 | 설명 | 장점 | 단점 |
+|-----------|------|------|------|
+| 1 | 블록을 1개 DataNode에만 저장 | 네트워크 문제 없음 | 장애 시 데이터 손실 |
+| 2 | 블록을 2개 DataNode에 복제 | 1대 장애 허용 | DataNode 간 통신 필요 |
+| 3 (기본) | 블록을 3개 DataNode에 복제 | 2대 장애 허용 | 더 많은 통신 필요 |
+
+**참고:**
+- 개발/테스트 환경에서는 복제 팩터 1 권장
+- 프로덕션 환경에서는 복제 팩터 2 이상 + 네트워크 설정 필요
+- Kubernetes 환경에서는 Pod 간 네트워크가 자동 구성되어 복제 팩터 2 이상 사용 가능
+
+**적용 후 재시작:**
+```bash
+# Master
+docker compose -f docker-compose.master.yml down
+docker compose -f docker-compose.master.yml up -d
+
+# Worker 1
+docker compose -f docker-compose.worker1.yml down
+docker compose -f docker-compose.worker1.yml up -d
+
+# Worker 2
+docker compose -f docker-compose.worker2.yml down
+docker compose -f docker-compose.worker2.yml up -d
+```
