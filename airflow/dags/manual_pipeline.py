@@ -1,12 +1,10 @@
 """
-수동 실행용 파이프라인 DAG
-- 테스트용으로 수동 트리거
+수동 트리거용 로그 분석 파이프라인
 """
 
-from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.bash import BashOperator
-
+from datetime import datetime, timedelta
 
 default_args = {
     'owner': 'data-team',
@@ -19,33 +17,28 @@ default_args = {
 dag = DAG(
     'manual_log_pipeline',
     default_args=default_args,
-    description='수동 실행 로그 분석 파이프라인',
-    schedule_interval=None,  # 수동 트리거만
+    description='수동 트리거용 로그 분석 파이프라인',
+    schedule_interval=None,
     catchup=False,
-    tags=['logs', 'manual', 'batch'],
+    tags=['batch', 'logs', 'manual'],
 )
 
-# 오늘 날짜
-date_param = '{{ ds }}'
-
-# Task 1: 일별 리포트
 daily_report = BashOperator(
     task_id='daily_report',
-    bash_command=f'''
+    bash_command='''
         docker exec spark-master /spark/bin/spark-submit \
-            --master spark://spark-master:7077 \
-            /opt/spark-jobs/batch/daily_report.py {date_param}
+            --master spark://192.168.55.114:7077 \
+            /opt/spark-jobs/batch/daily_report.py {{ ds }}
     ''',
     dag=dag,
 )
 
-# Task 2: 서비스 분석
 service_analysis = BashOperator(
     task_id='service_analysis',
-    bash_command=f'''
+    bash_command='''
         docker exec spark-master /spark/bin/spark-submit \
-            --master spark://spark-master:7077 \
-            /opt/spark-jobs/batch/service_analysis.py {date_param}
+            --master spark://192.168.55.114:7077 \
+            /opt/spark-jobs/batch/service_analysis.py {{ ds }}
     ''',
     dag=dag,
 )

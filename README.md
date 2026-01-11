@@ -1830,3 +1830,95 @@ docker compose -f docker-compose.worker1.yml up -d
 docker compose -f docker-compose.worker2.yml down
 docker compose -f docker-compose.worker2.yml up -d
 ```
+
+---
+
+#### 문제 13: Airflow에서 Spark Master 호스트명 해석 실패
+
+**증상:**
+```
+WARN TransportClientFactory: DNS resolution failed for spark-master:7077 took 5003 ms
+WARN StandaloneAppClient$ClientEndpoint: Failed to connect to master spark-master:7077
+Caused by: java.net.UnknownHostException: spark-master
+ERROR StandaloneSchedulerBackend: Application has been killed. Reason: All masters are unresponsive!
+```
+
+**원인:**
+- Spark Master가 `network_mode: host`로 변경됨
+- Airflow DAG에서 `spark://spark-master:7077`로 연결 시도
+- Docker 서비스명 `spark-master`를 DNS로 해석 불가
+- Airflow 컨테이너는 `pipeline-network`에 있고, Spark Master는 host 네트워크 사용
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    네트워크 구조                             │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  Airflow (pipeline-network)                                  │
+│       │                                                      │
+│       │ spark://spark-master:7077                            │
+│       ▼                                                      │
+│  ❌ DNS 해석 실패                                            │
+│                                                              │
+│  Spark Master (network_mode: host)                           │
+│       │                                                      │
+│       └─ 실제 주소: 192.168.55.114:7077                      │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**해결:**
+Airflow DAG 파일에서 Docker 서비스명 대신 실제 IP 사용:
+```python
+# 수정 전
+daily_report = BashOperator(
+    task_id='daily_report',
+    bash_command='''
+        docker exec spark-master /spark/bin/spark-submit \
+            --master spark://spark-master:7077 \
+            /opt/spark-jobs/batch/daily_report.py {{ ds }}
+    ''',
+    dag=dag,
+)
+
+# 수정 후
+daily_report = BashOperator(
+    task_id='daily_report',
+    bash_command='''
+        docker exec spark-master /spark/bin/spark-submit \
+            --master spark://192.168.55.114:7077 \
+            /opt/spark-jobs/batch/daily_report.py {{ ds }}
+    ''',
+    dag=dag,
+)
+```
+
+**수정 파일:**
+- `airflow/dags/manual_pipeline.py`
+- `airflow/dags/daily_pipeline.py`
+
+**적용:**
+DAG 파일 수정 후 Airflow가 자동으로 감지 (재시작 불필요)
+
+**확인:**
+```bash
+# Airflow UI에서
+1. 실패한 DAG run Clear 또는 삭제
+2. Trigger DAG 클릭
+3. Task 로그에서 "Successfully registered with master" 확인
+```
+
+---
+
+### 분산 환경 IP 사용 요약
+
+`network_mode: host` 사용 시 Docker 서비스명 대신 실제 IP를 사용해야 하는 곳:
+
+| 파일 | 변경 항목 |
+|------|-----------|
+| `spark-jobs/streaming/raw_to_hdfs.py` | `hdfs://192.168.55.114:9000`, `192.168.55.114:9092` |
+| `spark-jobs/batch/daily_report.py` | `hdfs://192.168.55.114:9000` |
+| `spark-jobs/batch/service_analysis.py` | `hdfs://192.168.55.114:9000` |
+| `airflow/dags/manual_pipeline.py` | `spark://192.168.55.114:7077` |
+| `airflow/dags/daily_pipeline.py` | `spark://192.168.55.114:7077` |
+| `docker-compose.worker1.yml` | `SPARK_MASTER=spark://192.168.55.114:7077` |
+| `docker-compose.worker2.yml` | `SPARK_MASTER=spark://192.168.55.114:7077` |
