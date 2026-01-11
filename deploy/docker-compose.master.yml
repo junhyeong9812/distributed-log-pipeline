@@ -1,6 +1,6 @@
 services:
   # ================================
-  # Kafka (KRaft 모드 - Zookeeper 없이)
+  # Kafka (KRaft 모드)
   # ================================
   kafka:
     image: apache/kafka:3.7.0
@@ -25,11 +25,11 @@ services:
       - pipeline-network
 
   # ================================
-  # Java Backend (수집 서버)
+  # Java Backend
   # ================================
   backend:
     build:
-      context: ./backend
+      context: ../backend
       dockerfile: Dockerfile
     container_name: backend
     ports:
@@ -42,11 +42,11 @@ services:
       - pipeline-network
 
   # ================================
-  # Python Generator (데이터 생성기)
+  # Python Generator
   # ================================
   generator:
     build:
-      context: ./generator
+      context: ../generator
       dockerfile: Dockerfile
     container_name: generator
     ports:
@@ -62,7 +62,7 @@ services:
       - pipeline-network
 
   # ================================
-  # Kafka UI (모니터링용)
+  # Kafka UI
   # ================================
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
@@ -78,7 +78,7 @@ services:
       - pipeline-network
 
   # ================================
-  # HDFS NameNode (마스터)
+  # HDFS NameNode
   # ================================
   namenode:
     image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
@@ -88,45 +88,13 @@ services:
       - "9000:9000"
     environment:
       - CLUSTER_NAME=distributed-log-pipeline
-      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - CORE_CONF_fs_defaultFS=hdfs://192.168.55.114:9000
       - CORE_CONF_hadoop_http_staticuser_user=root
       - HDFS_CONF_dfs_webhdfs_enabled=true
       - HDFS_CONF_dfs_permissions_enabled=false
       - HDFS_CONF_dfs_replication=2
     volumes:
       - namenode_data:/hadoop/dfs/name
-    networks:
-      - pipeline-network
-
-  # ================================
-  # HDFS DataNode 1
-  # ================================
-  datanode1:
-    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
-    container_name: datanode1
-    depends_on:
-      - namenode
-    environment:
-      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
-      - HDFS_CONF_dfs_replication=2
-    volumes:
-      - datanode1_data:/hadoop/dfs/data
-    networks:
-      - pipeline-network
-
-  # ================================
-  # HDFS DataNode 2
-  # ================================
-  datanode2:
-    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
-    container_name: datanode2
-    depends_on:
-      - namenode
-    environment:
-      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
-      - HDFS_CONF_dfs_replication=2
-    volumes:
-      - datanode2_data:/hadoop/dfs/data
     networks:
       - pipeline-network
 
@@ -142,29 +110,12 @@ services:
     environment:
       - INIT_DAEMON_STEP=setup_spark
     volumes:
-      - ./spark-jobs:/opt/spark-jobs
+      - ../spark-jobs:/opt/spark-jobs
     networks:
       - pipeline-network
 
   # ================================
-  # Spark Worker
-  # ================================
-  spark-worker:
-    image: bde2020/spark-worker:3.3.0-hadoop3.3
-    container_name: spark-worker
-    depends_on:
-      - spark-master
-    ports:
-      - "8083:8081"
-    environment:
-      - SPARK_MASTER=spark://spark-master:7077
-    volumes:
-      - ./spark-jobs:/opt/spark-jobs
-    networks:
-      - pipeline-network
-
-  # ================================
-  # Airflow (스케줄러)
+  # Airflow
   # ================================
   airflow:
     image: apache/airflow:2.7.0-python3.10
@@ -179,15 +130,15 @@ services:
       - AIRFLOW__CORE__LOAD_EXAMPLES=False
       - AIRFLOW__WEBSERVER__SECRET_KEY=mysecretkey123
     volumes:
-      - ./airflow/dags:/opt/airflow/dags
-      - ./spark-jobs:/opt/spark-jobs
+      - ../airflow/dags:/opt/airflow/dags
+      - ../spark-jobs:/opt/spark-jobs
       - /var/run/docker.sock:/var/run/docker.sock
     command: bash -c "airflow db init && airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com || true && (airflow webserver &) && airflow scheduler"
     networks:
       - pipeline-network
 
   # ================================
-  # Prometheus (메트릭 수집)
+  # Prometheus
   # ================================
   prometheus:
     image: prom/prometheus:v2.47.0
@@ -195,7 +146,7 @@ services:
     ports:
       - "9090:9090"
     volumes:
-      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ../monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
       - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
@@ -204,7 +155,7 @@ services:
       - pipeline-network
 
   # ================================
-  # Grafana (시각화)
+  # Grafana
   # ================================
   grafana:
     image: grafana/grafana:10.1.0
@@ -215,7 +166,7 @@ services:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=admin
     volumes:
-      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - ../monitoring/grafana/provisioning:/etc/grafana/provisioning
       - grafana_data:/var/lib/grafana
     depends_on:
       - prometheus
@@ -225,8 +176,6 @@ services:
 volumes:
   kafka_data:
   namenode_data:
-  datanode1_data:
-  datanode2_data:
   prometheus_data:
   grafana_data:
 
