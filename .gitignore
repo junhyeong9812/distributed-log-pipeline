@@ -1,0 +1,54 @@
+# Java
+*.class
+*.jar
+*.war
+*.ear
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Gradle
+.gradle/
+**/build/
+!src/**/build/
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+*.swp
+*.swo
+.project
+.classpath
+.settings/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+.env
+*.egg-info/
+dist/
+
+# Logs
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+docker-compose.override.yml
+
+# Kubernetes
+*.kubeconfig
+
+# 환경설정
+.env.local
+.env.*.local
