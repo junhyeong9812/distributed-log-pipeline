@@ -1,7 +1,5 @@
 """
 Raw 로그를 HDFS에 저장하는 Spark Streaming Job
-- Kafka에서 원본 로그 읽기
-- HDFS에 시간별 파티션으로 저장
 """
 
 from pyspark.sql import SparkSession
@@ -18,9 +16,7 @@ from pyspark.sql.types import (
 def create_spark_session():
     return SparkSession.builder \
         .appName("RawLogToHDFS") \
-        .config("spark.jars.packages",
-                "org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.0") \
-        .config("spark.hadoop.fs.defaultFS", "hdfs://namenode:9000") \
+        .config("spark.hadoop.fs.defaultFS", "hdfs://192.168.55.114:9000") \
         .getOrCreate()
 
 
@@ -43,15 +39,14 @@ def main():
     print("Starting Raw Log to HDFS Job")
     print("=" * 60)
 
-    # Kafka에서 스트림 읽기
     kafka_df = spark.readStream \
         .format("kafka") \
-        .option("kafka.bootstrap.servers", "kafka:9092") \
+        .option("kafka.bootstrap.servers", "192.168.55.114:9092") \
         .option("subscribe", "logs.raw") \
         .option("startingOffsets", "latest") \
+        .option("failOnDataLoss", "false") \
         .load()
 
-    # JSON 파싱
     log_schema = get_log_schema()
 
     parsed_df = kafka_df \
@@ -64,13 +59,12 @@ def main():
         .withColumn("day", dayofmonth(col("event_time"))) \
         .withColumn("hour", hour(col("event_time")))
 
-    # HDFS에 파티션별 저장
     query = parsed_df \
         .writeStream \
         .outputMode("append") \
         .format("parquet") \
-        .option("path", "hdfs://namenode:9000/data/logs/raw") \
-        .option("checkpointLocation", "hdfs://namenode:9000/checkpoints/raw_logs") \
+        .option("path", "hdfs://192.168.55.114:9000/data/logs/raw") \
+        .option("checkpointLocation", "hdfs://192.168.55.114:9000/checkpoints/raw_logs") \
         .partitionBy("year", "month", "day", "hour") \
         .trigger(processingTime="60 seconds") \
         .start()

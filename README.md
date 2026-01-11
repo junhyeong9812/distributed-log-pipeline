@@ -1421,3 +1421,260 @@ docker exec namenode hdfs dfsadmin -report
 http://192.168.55.114:8082
 # Workers에 실제 IP가 보여야 함
 ```
+
+---
+
+#### 문제 4: Docker 네트워크 격리로 인한 연결 문제
+
+**증상:**
+```
+WARN DataStreamer: Exception in createBlockOutputStream
+java.io.EOFException: Unexpected EOF while trying to read response from server
+WARN TaskSchedulerImpl: Initial job has not accepted any resources; 
+check your cluster UI to ensure that workers are registered and have sufficient resources
+```
+
+**원인:**
+- Docker 기본 bridge 네트워크는 컨테이너를 격리함
+- Master와 Worker가 서로 다른 PC에 있을 때 Docker 내부 IP로 통신 시도
+- DataNode/Spark Worker가 내부 IP(172.x.x.x)를 Master에 보고
+- Master가 해당 내부 IP로 접근 시도 → 실패
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   네트워크 문제 상황                          │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  Master (192.168.55.114)                                     │
+│       │                                                      │
+│       │ DataNode 위치 조회                                   │
+│       ▼                                                      │
+│  NameNode: "DataNode는 172.19.0.3:9866에 있어"              │
+│       │                                                      │
+│       │ 172.19.0.3:9866 접근 시도                           │
+│       ▼                                                      │
+│  ❌ 실패 (172.x.x.x는 Worker PC 내부 Docker IP)             │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**해결:**
+Worker의 docker-compose.worker.yml에서 `network_mode: host` 사용:
+```yaml
+services:
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://192.168.55.114:9000
+      - HDFS_CONF_dfs_replication=2
+      - HDFS_CONF_dfs_datanode_address=0.0.0.0:9866
+      - HDFS_CONF_dfs_datanode_http_address=0.0.0.0:9864
+      - HDFS_CONF_dfs_datanode_ipc_address=0.0.0.0:9867
+      - HDFS_CONF_dfs_datanode_use_datanode_hostname=false
+      - HDFS_CONF_dfs_client_use_datanode_hostname=false
+    volumes:
+      - datanode_data:/hadoop/dfs/data
+    network_mode: host    # ← 핵심!
+
+  spark-worker:
+    image: bde2020/spark-worker:3.3.0-hadoop3.3
+    container_name: spark-worker
+    environment:
+      - SPARK_MASTER=spark://192.168.55.114:7077
+    volumes:
+      - ./spark-jobs:/opt/spark-jobs
+    network_mode: host    # ← 핵심!
+
+volumes:
+  datanode_data:
+```
+
+**network_mode: host 설명:**
+
+| 모드 | 설명 | IP 예시 |
+|------|------|---------|
+| bridge (기본) | Docker 가상 네트워크 사용 | 172.19.0.3 |
+| host | 호스트 네트워크 직접 사용 | 192.168.55.158 |
+
+**주의사항:**
+- `network_mode: host` 사용 시 `ports` 설정 불필요 (충돌 발생)
+- 컨테이너가 호스트의 모든 포트에 직접 바인딩됨
+- Linux에서만 지원 (Mac/Windows 미지원)
+
+**적용:**
+```bash
+# Worker에서 실행 (리눅스 A, B 둘 다)
+docker compose -f docker-compose.worker.yml down
+docker compose -f docker-compose.worker.yml up -d
+```
+
+**확인:**
+```bash
+# Master에서 DataNode 확인
+docker exec namenode hdfs dfsadmin -report
+# Live datanodes에 실제 IP(192.168.55.x)가 보여야 함
+
+# Spark UI에서 Worker 확인
+http://192.168.55.114:8082
+# Workers에 실제 IP가 보여야 함
+```
+
+---
+
+### 분산 환경 네트워크 트러블슈팅 종합
+
+분산 환경에서 발생할 수 있는 네트워크 관련 문제들을 정리합니다.
+
+#### 문제 5: Spark Driver 호스트명 해석 실패
+
+**증상:**
+```
+WARN TaskSchedulerImpl: Initial job has not accepted any resources;
+check your cluster UI to ensure that workers are registered and have sufficient resources
+```
+
+Worker 로그:
+```
+--driver-url "spark://CoarseGrainedScheduler@jun-Victus-by-HP-Gaming-Laptop-16-r0xxx.local:44691"
+```
+
+**원인:**
+- Spark Master가 `network_mode: host`로 실행되면서 호스트명 사용
+- Worker에서 Master의 호스트명을 해석 못함
+
+**해결:**
+Worker의 docker-compose에 `extra_hosts` 추가:
+```yaml
+services:
+  spark-worker:
+    extra_hosts:
+      - "jun-Victus-by-HP-Gaming-Laptop-16-r0xxx.local:192.168.55.114"
+```
+
+또는 Worker PC의 /etc/hosts에 추가:
+```bash
+echo "192.168.55.114 jun-Victus-by-HP-Gaming-Laptop-16-r0xxx.local" | sudo tee -a /etc/hosts
+```
+
+---
+
+#### 문제 6: DataNode 간 복제 실패
+
+**증상:**
+```
+Starting thread to transfer blk_xxx to 192.168.55.158:9866
+java.nio.channels.UnresolvedAddressException
+```
+
+**원인:**
+- HDFS 복제 팩터가 2로 설정됨
+- DataNode가 다른 DataNode로 블록 복제 시도
+- Docker 컨테이너 내부에서 다른 Worker IP를 해석 못함
+
+**해결:**
+각 Worker의 docker-compose에 다른 Worker IP 추가:
+```yaml
+# Worker 1 (192.168.55.158)
+services:
+  datanode:
+    extra_hosts:
+      - "worker2:192.168.55.9"
+
+# Worker 2 (192.168.55.9)
+services:
+  datanode:
+    extra_hosts:
+      - "worker1:192.168.55.158"
+```
+
+---
+
+#### 문제 7: Kafka 오프셋 불일치
+
+**증상:**
+```
+ERROR: Partition logs.raw-0's offset was changed from 8400 to 5100,
+some data may have been missed.
+```
+
+**원인:**
+- Spark Streaming Job이 비정상 종료
+- 체크포인트의 오프셋과 Kafka의 실제 오프셋 불일치
+- Kafka 데이터가 retention 정책으로 삭제됨
+
+**해결:**
+
+1. 체크포인트 삭제:
+```bash
+docker exec namenode hdfs dfs -rm -r /checkpoints/raw_logs
+docker exec namenode hdfs dfs -mkdir -p /checkpoints/raw_logs
+```
+
+2. Spark Job에 failOnDataLoss 옵션 추가:
+```python
+kafka_df = spark.readStream \
+    .format("kafka") \
+    .option("failOnDataLoss", "false") \  # 데이터 손실 허용
+    .load()
+```
+
+---
+
+#### 문제 8: Spark Job IP vs 호스트명 문제
+
+**증상:**
+```
+java.lang.IllegalArgumentException: java.net.UnknownHostException: namenode
+```
+
+**원인:**
+- Spark Master가 `network_mode: host`로 변경되면서 Docker 내부 DNS 사용 불가
+- Spark Job에서 `namenode`, `kafka` 등 Docker 서비스명 사용
+
+**해결:**
+Spark Job 파일에서 서비스명 대신 실제 IP 사용:
+```python
+# 수정 전
+.config("spark.hadoop.fs.defaultFS", "hdfs://namenode:9000")
+.option("kafka.bootstrap.servers", "kafka:9092")
+
+# 수정 후
+.config("spark.hadoop.fs.defaultFS", "hdfs://192.168.55.114:9000")
+.option("kafka.bootstrap.servers", "192.168.55.114:9092")
+```
+
+---
+
+### 분산 환경 파일 구조
+```
+deploy/
+├── docker-compose.master.yml    # Master 노드용
+├── docker-compose.worker1.yml   # Worker 1 (192.168.55.158)용
+└── docker-compose.worker2.yml   # Worker 2 (192.168.55.9)용
+```
+
+### 분산 환경 실행 순서
+```bash
+# 1. Master 먼저 실행
+cd deploy
+docker compose -f docker-compose.master.yml up -d
+
+# 2. Worker 1 실행 (192.168.55.158에서)
+docker compose -f docker-compose.worker1.yml up -d
+
+# 3. Worker 2 실행 (192.168.55.9에서)
+docker compose -f docker-compose.worker2.yml up -d
+
+# 4. 상태 확인
+docker exec namenode hdfs dfsadmin -report
+# Spark UI: http://192.168.55.114:8082
+```
+
+### 네트워크 체크리스트
+
+| 항목 | Master | Worker 1 | Worker 2 |
+|------|--------|----------|----------|
+| **Master 호스트명 등록** | - | extra_hosts 또는 /etc/hosts | extra_hosts 또는 /etc/hosts |
+| **다른 Worker IP 등록** | - | worker2 IP | worker1 IP |
+| **network_mode** | host (spark-master만) | host | host |
+| **Spark Job IP 사용** | 192.168.55.114 | - | - |
