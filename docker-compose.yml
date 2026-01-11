@@ -163,6 +163,29 @@ services:
     networks:
       - pipeline-network
 
+  # ================================
+  # Airflow (스케줄러)
+  # ================================
+  airflow:
+    image: apache/airflow:2.7.0-python3.10
+    container_name: airflow
+    user: root
+    ports:
+      - "8084:8080"
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=SequentialExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/airflow.db
+      - AIRFLOW__CORE__FERNET_KEY=46BKJoQYlPPOexq0OhDZnIlNepKFf87WFwLbfzqDDho=
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__WEBSERVER__SECRET_KEY=mysecretkey123
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./spark-jobs:/opt/spark-jobs
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: bash -c "airflow db init && airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com || true && (airflow webserver &) && airflow scheduler"
+    networks:
+      - pipeline-network
+
 volumes:
   kafka_data:
   namenode_data:

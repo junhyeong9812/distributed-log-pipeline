@@ -781,3 +781,110 @@ docker compose up -d
 #### 예방 방법
 
 Spark Job 종료 시 항상 `Ctrl+C`로 정상 종료하고, Spark UI에서 Application이 Completed로 변경되었는지 확인.
+
+---
+
+### Airflow 설정 및 트러블슈팅
+
+#### Airflow 기본 정보
+
+| 항목 | 내용 |
+|------|------|
+| **언어** | Python |
+| **기본 DB** | SQLite (개발용) |
+| **운영 DB** | PostgreSQL, MySQL (권장) |
+
+#### 문제 1: DB 초기화 실패
+
+**증상:**
+```
+ERROR: You need to initialize the database. Please run `airflow db init`.
+```
+
+**원인:**
+- 이전 실행에서 DB가 불완전하게 생성됨
+- `docker compose down`은 볼륨을 유지하므로 불완전한 DB가 남아있음
+
+**해결:**
+```bash
+# 볼륨까지 삭제해서 깨끗하게 시작
+docker compose down -v
+docker compose up -d
+```
+
+#### 문제 2: SQLite + LocalExecutor 호환 불가
+
+**증상:**
+```
+airflow.exceptions.AirflowConfigException: error: cannot use SQLite with the LocalExecutor
+```
+
+**원인:**
+- SQLite는 동시 쓰기를 지원하지 않음
+- LocalExecutor는 병렬 실행을 위해 동시 DB 접근 필요
+- 따라서 SQLite + LocalExecutor 조합은 불가
+
+**Executor 종류:**
+
+| Executor | DB 요구사항 | 특징 |
+|----------|------------|------|
+| **SequentialExecutor** | SQLite 가능 | 순차 실행, 개발용 |
+| **LocalExecutor** | PostgreSQL/MySQL 필요 | 병렬 실행 |
+| **CeleryExecutor** | PostgreSQL/MySQL + Redis | 분산 실행 |
+| **KubernetesExecutor** | PostgreSQL/MySQL | K8s Pod으로 실행 |
+
+**해결:**
+```yaml
+# docker-compose.yml
+environment:
+  # 수정 전 (에러 발생)
+  - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+  
+  # 수정 후 (정상 동작)
+  - AIRFLOW__CORE__EXECUTOR=SequentialExecutor
+```
+
+#### 문제 3: DB 명령어 버전 차이
+
+**증상:**
+```
+DeprecationWarning: `db init` is deprecated. Use `db migrate` instead
+```
+
+**원인:**
+- Airflow 2.7.0부터 `airflow db init`이 deprecated
+- 새 버전에서는 `airflow db migrate` 사용 권장
+
+**해결:**
+```yaml
+# 두 명령어 모두 실행하여 호환성 확보
+command: bash -c "airflow db init && airflow users create ... "
+```
+
+#### 최종 Airflow 설정 (docker-compose.yml)
+```yaml
+airflow:
+  image: apache/airflow:2.7.0-python3.10
+  container_name: airflow
+  user: root
+  ports:
+    - "8084:8080"
+  environment:
+    - AIRFLOW__CORE__EXECUTOR=SequentialExecutor  # SQLite와 호환
+    - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/airflow.db
+    - AIRFLOW__CORE__FERNET_KEY=46BKJoQYlPPOexq0OhDZnIlNepKFf87WFwLbfzqDDho=
+    - AIRFLOW__CORE__LOAD_EXAMPLES=False
+    - AIRFLOW__WEBSERVER__SECRET_KEY=mysecretkey123
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./spark-jobs:/opt/spark-jobs
+    - /var/run/docker.sock:/var/run/docker.sock  # Docker 명령 실행용
+  command: bash -c "airflow db init && airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com || true && (airflow webserver &) && airflow scheduler"
+```
+
+#### Airflow 접속 정보
+```
+URL: http://<MASTER_IP>:8084
+ID: admin
+PW: admin
+```
