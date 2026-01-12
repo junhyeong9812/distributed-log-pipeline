@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-master
+  namespace: log-pipeline
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spark-master
+  template:
+    metadata:
+      labels:
+        app: spark-master
+    spec:
+      hostname: spark-master
+      subdomain: spark-headless
+      containers:
+        - name: spark-master
+          image: bde2020/spark-master:3.3.0-hadoop3.3
+          ports:
+            - containerPort: 8080
+            - containerPort: 7077
+          env:
+            - name: INIT_DAEMON_STEP
+              value: "setup_spark"
+            - name: SPARK_MASTER_PORT
+              value: "7077"
+            - name: SPARK_MASTER_WEBUI_PORT
+              value: "8080"
+            - name: SPARK_PUBLIC_DNS
+              value: "spark-master.spark-headless.log-pipeline.svc.cluster.local"
+          volumeMounts:
+            - name: spark-jobs
+              mountPath: /opt/spark-jobs
+      volumes:
+        - name: spark-jobs
+          configMap:
+            name: spark-jobs
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-headless
+  namespace: log-pipeline
+spec:
+  selector:
+    app: spark-master
+  ports:
+    - name: web
+      port: 8080
+      targetPort: 8080
+    - name: spark
+      port: 7077
+      targetPort: 7077
+  clusterIP: None
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-master-svc
+  namespace: log-pipeline
+spec:
+  selector:
+    app: spark-master
+  ports:
+    - name: web
+      port: 8080
+      targetPort: 8080
+    - name: spark
+      port: 7077
+      targetPort: 7077
+  type: ClusterIP

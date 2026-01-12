@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: spark-worker
+  namespace: log-pipeline
+spec:
+  selector:
+    matchLabels:
+      app: spark-worker
+  template:
+    metadata:
+      labels:
+        app: spark-worker
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+      containers:
+        - name: spark-worker
+          image: bde2020/spark-worker:3.3.0-hadoop3.3
+          ports:
+            - containerPort: 8081
+          env:
+            - name: SPARK_MASTER
+              value: "spark://spark-master-svc.log-pipeline.svc.cluster.local:7077"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-worker-svc
+  namespace: log-pipeline
+spec:
+  selector:
+    app: spark-worker
+  ports:
+    - name: web
+      port: 8081
+      targetPort: 8081
+  clusterIP: None
