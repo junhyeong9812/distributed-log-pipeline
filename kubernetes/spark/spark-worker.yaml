@@ -27,6 +27,17 @@ spec:
           env:
             - name: SPARK_MASTER
               value: "spark://spark-master-svc.log-pipeline.svc.cluster.local:7077"
+            - name: SPARK_WORKER_MEMORY
+              value: "1536m"
+            - name: SPARK_WORKER_CORES
+              value: "2"
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "1"
+            limits:
+              memory: "2Gi"
+              cpu: "2"
 ---
 apiVersion: v1
 kind: Service
