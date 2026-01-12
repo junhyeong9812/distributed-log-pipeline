@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: datanode
+  namespace: log-pipeline
+spec:
+  selector:
+    matchLabels:
+      app: datanode
+  template:
+    metadata:
+      labels:
+        app: datanode
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+      containers:
+        - name: datanode
+          image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+          ports:
+            - containerPort: 9864
+            - containerPort: 9866
+            - containerPort: 9867
+          env:
+            - name: CORE_CONF_fs_defaultFS
+              value: "hdfs://namenode.log-pipeline.svc.cluster.local:9000"
+            - name: HDFS_CONF_dfs_replication
+              value: "1"
+            - name: HDFS_CONF_dfs_datanode_use_datanode_hostname
+              value: "false"
+            - name: HDFS_CONF_dfs_client_use_datanode_hostname
+              value: "false"
+          volumeMounts:
+            - name: datanode-data
+              mountPath: /hadoop/dfs/data
+      volumes:
+        - name: datanode-data
+          hostPath:
+            path: /data/hdfs/datanode
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: datanode
+  namespace: log-pipeline
+spec:
+  selector:
+    app: datanode
+  ports:
+    - name: web
+      port: 9864
+      targetPort: 9864
+    - name: data
+      port: 9866
+      targetPort: 9866
+    - name: ipc
+      port: 9867
+      targetPort: 9867
+  clusterIP: None

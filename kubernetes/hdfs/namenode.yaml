@@ -1,0 +1,72 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: namenode-pvc
+  namespace: log-pipeline
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: namenode
+  namespace: log-pipeline
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: namenode
+  template:
+    metadata:
+      labels:
+        app: namenode
+    spec:
+      containers:
+        - name: namenode
+          image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+          ports:
+            - containerPort: 9870
+            - containerPort: 9000
+          env:
+            - name: CLUSTER_NAME
+              value: "log-pipeline"
+            - name: CORE_CONF_fs_defaultFS
+              value: "hdfs://namenode.log-pipeline.svc.cluster.local:9000"
+            - name: CORE_CONF_hadoop_http_staticuser_user
+              value: "root"
+            - name: HDFS_CONF_dfs_webhdfs_enabled
+              value: "true"
+            - name: HDFS_CONF_dfs_permissions_enabled
+              value: "false"
+            - name: HDFS_CONF_dfs_replication
+              value: "1"
+            - name: HDFS_CONF_dfs_namenode_datanode_registration_ip___hostname___check
+              value: "false"
+          volumeMounts:
+            - name: namenode-data
+              mountPath: /hadoop/dfs/name
+      volumes:
+        - name: namenode-data
+          persistentVolumeClaim:
+            claimName: namenode-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: namenode
+  namespace: log-pipeline
+spec:
+  selector:
+    app: namenode
+  ports:
+    - name: web
+      port: 9870
+      targetPort: 9870
+    - name: hdfs
+      port: 9000
+      targetPort: 9000
+  type: ClusterIP
