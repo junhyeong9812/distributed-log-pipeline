@@ -1,10 +1,10 @@
 from pydantic_settings import BaseSettings
-from typing import Optional
+import os
 
 
 class Settings(BaseSettings):
-    # Backend API 설정
-    backend_url: str = "http://localhost:8081"
+    # Backend API 설정 - K8s 환경변수 우선
+    backend_url: str = os.getenv("BACKEND_URL", "http://localhost:8081")
     backend_timeout: int = 30
 
     # 배치 스케줄 설정

@@ -22,7 +22,7 @@ public class KafkaConfig {
     public NewTopic logsTopic() {
         return TopicBuilder.name(logsTopic)
                 .partitions(3)
-                .replicas(2)
+                .replicas(1)
                 .build();
     }
 
@@ -30,7 +30,7 @@ public class KafkaConfig {
     public NewTopic eventsTopic() {
         return TopicBuilder.name(eventsTopic)
                 .partitions(3)
-                .replicas(2)
+                .replicas(1)
                 .build();
     }
 

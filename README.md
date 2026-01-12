@@ -1189,6 +1189,459 @@ docker compose -f docker-compose.worker.yml ps
 
 ---
 
+---
+
+## ☸️ Kubernetes 환경 구성
+
+### 개요
+
+Docker Compose 분산 환경을 Kubernetes(k3s)로 마이그레이션합니다.
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    Kubernetes 클러스터 구성                          │
+└─────────────────────────────────────────────────────────────────────┘
+
+    ┌─────────────────────────────────────────────────────────┐
+    │        노트북 - Master (192.168.55.114)                  │
+    │        k3s control-plane                                 │
+    │                                                          │
+    │  ┌──────────────────────────────────────────────────┐   │
+    │  │              log-pipeline namespace               │   │
+    │  │                                                   │   │
+    │  │  ┌─────────┐ ┌─────────┐ ┌─────────┐            │   │
+    │  │  │  Kafka  │ │NameNode │ │ Spark   │            │   │
+    │  │  │   Pod   │ │   Pod   │ │ Master  │            │   │
+    │  │  └─────────┘ └─────────┘ └─────────┘            │   │
+    │  │                                                   │   │
+    │  │  ┌─────────┐ ┌─────────┐ ┌─────────┐            │   │
+    │  │  │ Airflow │ │ Grafana │ │Promethe │            │   │
+    │  │  │   Pod   │ │   Pod   │ │us Pod   │            │   │
+    │  │  └─────────┘ └─────────┘ └─────────┘            │   │
+    │  │                                                   │   │
+    │  │  ┌─────────┐ ┌─────────┐                         │   │
+    │  │  │ Backend │ │Generator│                         │   │
+    │  │  │   Pod   │ │   Pod   │                         │   │
+    │  │  └─────────┘ └─────────┘                         │   │
+    │  └──────────────────────────────────────────────────┘   │
+    └─────────────────────────────────────────────────────────┘
+                              │
+              ┌───────────────┴───────────────┐
+              │                               │
+              ▼                               ▼
+    ┌─────────────────────┐       ┌─────────────────────┐
+    │ 리눅스 A - Worker 1  │       │ 리눅스 B - Worker 2  │
+    │   k3s agent         │       │   k3s agent         │
+    │  (192.168.55.158)   │       │   (192.168.55.9)    │
+    │                     │       │                     │
+    │  ┌───────────────┐  │       │  ┌───────────────┐  │
+    │  │   DataNode    │  │       │  │   DataNode    │  │
+    │  │  (DaemonSet)  │  │       │  │  (DaemonSet)  │  │
+    │  └───────────────┘  │       │  └───────────────┘  │
+    │                     │       │                     │
+    │  ┌───────────────┐  │       │  ┌───────────────┐  │
+    │  │ Spark Worker  │  │       │  │ Spark Worker  │  │
+    │  │  (DaemonSet)  │  │       │  │  (DaemonSet)  │  │
+    │  └───────────────┘  │       │  └───────────────┘  │
+    └─────────────────────┘       └─────────────────────┘
+```
+
+### Docker Compose vs Kubernetes 비교
+
+| 항목 | Docker Compose | Kubernetes |
+|------|---------------|------------|
+| **오케스트레이션** | 단일/수동 | 자동화 |
+| **스케일링** | 수동 | 자동 (HPA) |
+| **자가 치유** | 없음 | Pod 자동 재시작 |
+| **서비스 디스커버리** | Docker DNS | K8s DNS |
+| **로드 밸런싱** | 수동 | Service 자동 |
+| **롤링 업데이트** | 수동 | 자동 |
+| **설정 관리** | .env 파일 | ConfigMap/Secret |
+
+---
+
+### k3s 클러스터 설치
+
+#### 1. Master 노드 (노트북)
+```bash
+# k3s 설치
+curl -sfL https://get.k3s.io | sh -s - --write-kubeconfig-mode 644
+
+# 설치 확인
+kubectl get nodes
+
+# Worker 조인용 토큰 확인
+sudo cat /var/lib/rancher/k3s/server/node-token
+```
+
+#### 2. Worker 노드 (리눅스 A, B)
+```bash
+# k3s agent 설치 (토큰은 Master에서 확인한 값)
+curl -sfL https://get.k3s.io | K3S_URL=https://192.168.55.114:6443 K3S_TOKEN=<토큰값> sh -
+```
+
+#### 3. 클러스터 확인 (Master에서)
+```bash
+kubectl get nodes
+```
+
+예상 출력:
+```
+NAME         STATUS   ROLES                  AGE
+jun-victus   Ready    control-plane,master   5m
+jun          Ready    <none>                 2m
+jun-mini1    Ready    <none>                 2m
+```
+
+---
+
+### Namespace 생성
+```bash
+kubectl apply -f kubernetes/namespace/namespace.yaml
+```
+```yaml
+# kubernetes/namespace/namespace.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: log-pipeline
+```
+
+---
+
+### 서비스 배포
+
+#### 배포 순서
+```
+1. Kafka
+2. HDFS (NameNode → DataNode)
+3. Spark (Master → Worker)
+4. Airflow
+5. Monitoring (Prometheus, Grafana)
+6. Apps (Backend, Generator)
+```
+
+#### Kubernetes 디렉토리 구조
+```
+kubernetes/
+├── namespace/
+│   └── namespace.yaml
+├── kafka/
+│   └── kafka.yaml
+├── hdfs/
+│   ├── namenode.yaml
+│   └── datanode.yaml
+├── spark/
+│   ├── spark-master.yaml
+│   ├── spark-worker.yaml
+│   └── spark-jobs-configmap.yaml
+├── airflow/
+│   └── airflow.yaml
+├── monitoring/
+│   ├── prometheus.yaml
+│   └── grafana.yaml
+├── apps/
+│   ├── backend.yaml
+│   └── generator.yaml
+└── nodeport.yaml
+```
+
+#### 전체 배포 명령어
+```bash
+# Namespace
+kubectl apply -f kubernetes/namespace/
+
+# 인프라 서비스
+kubectl apply -f kubernetes/kafka/
+kubectl apply -f kubernetes/hdfs/
+kubectl apply -f kubernetes/spark/
+
+# 애플리케이션
+kubectl apply -f kubernetes/airflow/
+kubectl apply -f kubernetes/monitoring/
+kubectl apply -f kubernetes/apps/
+
+# 외부 접속 (NodePort)
+kubectl apply -f kubernetes/nodeport.yaml
+```
+
+---
+
+### 커스텀 이미지 배포
+
+Backend, Generator는 로컬 빌드 이미지를 사용합니다.
+```bash
+# 1. 이미지 빌드
+cd backend
+./gradlew build -x test
+docker build -t log-pipeline-backend:latest .
+
+cd ../generator
+docker build -t log-pipeline-generator:latest .
+
+# 2. k3s로 이미지 가져오기
+docker save log-pipeline-backend:latest | sudo k3s ctr images import -
+docker save log-pipeline-generator:latest | sudo k3s ctr images import -
+
+# 3. 배포 (imagePullPolicy: Never 필수)
+kubectl apply -f kubernetes/apps/
+```
+
+---
+
+### 외부 접속 URL
+
+| 서비스 | NodePort | URL |
+|--------|----------|-----|
+| Grafana | 30000 | http://192.168.55.114:30000 |
+| Airflow | 30084 | http://192.168.55.114:30084 |
+| Spark UI | 30082 | http://192.168.55.114:30082 |
+| HDFS UI | 30870 | http://192.168.55.114:30870 |
+| Generator | 30800 | http://192.168.55.114:30800 |
+
+---
+
+### Spark Streaming Job 실행
+```bash
+# HDFS 디렉토리 생성 (선택사항 - 자동 생성됨)
+kubectl exec -n log-pipeline deployment/namenode -- hdfs dfs -mkdir -p /data/logs/raw
+kubectl exec -n log-pipeline deployment/namenode -- hdfs dfs -mkdir -p /checkpoints/raw_logs
+
+# Spark Streaming Job 실행
+kubectl exec -n log-pipeline deployment/spark-master -- /spark/bin/spark-submit \
+  --master spark://spark-master-svc.log-pipeline.svc.cluster.local:7077 \
+  --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.0 \
+  /opt/spark-jobs/raw_to_hdfs.py
+```
+
+---
+
+### 상태 확인 명령어
+```bash
+# 전체 Pod 상태
+kubectl get pods -n log-pipeline
+
+# 특정 Pod 로그
+kubectl logs -n log-pipeline deployment/<name> --tail=50
+
+# HDFS 클러스터 상태
+kubectl exec -n log-pipeline deployment/namenode -- hdfs dfsadmin -report
+
+# HDFS 데이터 확인
+kubectl exec -n log-pipeline deployment/namenode -- hdfs dfs -ls -R /data/logs/raw
+
+# Kafka 토픽 확인
+kubectl exec -n log-pipeline deployment/kafka -- /opt/kafka/bin/kafka-topics.sh --list --bootstrap-server localhost:9092
+```
+
+---
+
+### 클러스터 정리
+```bash
+# 모든 리소스 삭제
+kubectl delete namespace log-pipeline
+
+# k3s 제거 (Master)
+/usr/local/bin/k3s-uninstall.sh
+
+# k3s 제거 (Worker)
+/usr/local/bin/k3s-agent-uninstall.sh
+```
+
+---
+
+## 🔧 Kubernetes 환경 트러블슈팅
+
+### 문제 14: Spark Master Service 이름 충돌
+
+**증상:**
+```
+java.lang.NumberFormatException: For input string: "tcp://10.43.220.131:8080"
+```
+
+**원인:**
+- K8s가 Service 이름으로 환경변수 자동 생성
+- `spark-master` Service → `SPARK_MASTER_PORT=tcp://...`
+- Spark가 이 값을 숫자로 파싱 시도 → 실패
+
+**해결:**
+Service 이름을 `spark-master-svc`로 변경하고 환경변수 명시적 설정:
+```yaml
+env:
+  - name: SPARK_MASTER_PORT
+    value: "7077"
+```
+
+---
+
+### 문제 15: Airflow DAG 디렉토리 재귀 루프
+
+**증상:**
+```
+RuntimeError: Detected recursive loop when walking DAG directory
+```
+
+**원인:**
+- ConfigMap을 DAG 디렉토리에 직접 마운트
+- ConfigMap의 심볼릭 링크 구조가 무한 루프 유발
+
+**해결:**
+initContainer에서 DAG 파일을 PVC로 복사:
+```yaml
+initContainers:
+  - name: init-dags
+    command: ['sh', '-c', 'mkdir -p /opt/airflow/dags && cat > /opt/airflow/dags/pipeline.py << EOF...']
+```
+
+---
+
+### 문제 16: Airflow initContainer 디렉토리 생성 실패
+
+**증상:**
+```
+sh: can't create /opt/airflow/dags/manual_pipeline.py: nonexistent directory
+```
+
+**원인:**
+- PVC 마운트 시 빈 디렉토리로 시작
+- dags 디렉토리 미존재
+
+**해결:**
+initContainer에서 `mkdir -p` 먼저 실행:
+```yaml
+command: ['sh', '-c', 'mkdir -p /opt/airflow/dags && cat > ...']
+```
+
+---
+
+### 문제 17: Kafka Replication Factor 오류
+
+**증상:**
+```
+InvalidReplicationFactorException: Unable to replicate the partition 2 time(s): 
+only 1 broker(s) are registered
+```
+
+**원인:**
+- KafkaConfig에서 replicas(2) 설정
+- K8s에서 Kafka broker 1개만 실행
+
+**해결:**
+KafkaConfig.java에서 replicas를 1로 변경 후 이미지 재빌드
+
+---
+
+### 문제 18: Generator에서 Backend 연결 실패
+
+**증상:**
+```
+ERROR: Failed to send logs: All connection attempts failed
+```
+
+**원인:**
+- backend_url이 localhost로 설정됨
+- K8s에서는 Service DNS 사용 필요
+
+**해결:**
+환경변수로 URL 주입:
+```yaml
+env:
+  - name: BACKEND_URL
+    value: "http://backend-svc.log-pipeline.svc.cluster.local:8081"
+```
+
+---
+
+### 문제 19: Generator Settings 속성 누락
+
+**증상:**
+```
+AttributeError: 'Settings' object has no attribute 'services'
+```
+
+**원인:**
+- config.py 수정 시 기존 속성 누락
+
+**해결:**
+기존 설정 유지하면서 K8s 환경변수만 추가
+
+---
+
+### 문제 20: HDFS Cluster ID 불일치
+
+**증상:**
+```
+Incompatible clusterIDs in /hadoop/dfs/data: 
+namenode clusterID = CID-xxx; datanode clusterID = CID-yyy
+```
+
+**원인:**
+- NameNode 재생성 시 새 Cluster ID 발급
+- DataNode는 기존 ID 보유
+
+**해결:**
+Worker 노드에서 DataNode 데이터 삭제:
+```bash
+sudo rm -rf /data/hdfs/datanode/*
+kubectl rollout restart daemonset/datanode -n log-pipeline
+```
+
+---
+
+### 문제 21: Spark Executor 호스트명 해석 실패
+
+**증상:**
+```
+java.net.UnknownHostException: spark-master-5885b7bc-6lck4
+Failed to connect to spark-master-5885b7bc-6lck4:33405
+```
+
+**원인:**
+- Spark Master가 Pod 이름을 Driver URL로 사용
+- Worker에서 Pod 이름 DNS 해석 불가
+
+**해결:**
+Headless Service + hostname/subdomain으로 DNS 이름 부여:
+```yaml
+spec:
+  hostname: spark-master
+  subdomain: spark-headless
+  containers:
+    - env:
+        - name: SPARK_PUBLIC_DNS
+          value: "spark-master.spark-headless.log-pipeline.svc.cluster.local"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-headless
+spec:
+  clusterIP: None  # Headless Service
+```
+
+---
+
+### K8s 환경 체크리스트
+
+| 항목 | 확인 명령어 |
+|------|------------|
+| 노드 상태 | `kubectl get nodes` |
+| Pod 상태 | `kubectl get pods -n log-pipeline` |
+| Service 상태 | `kubectl get svc -n log-pipeline` |
+| Pod 로그 | `kubectl logs -n log-pipeline <pod>` |
+| Pod 상세 | `kubectl describe pod -n log-pipeline <pod>` |
+| HDFS 상태 | `kubectl exec -n log-pipeline deployment/namenode -- hdfs dfsadmin -report` |
+| Kafka 토픽 | `kubectl exec -n log-pipeline deployment/kafka -- kafka-topics.sh --list --bootstrap-server localhost:9092` |
+```
+
+---
+
+🎉 **K8s 파이프라인 완성!**
+
+전체 데이터 흐름:
+```
+Generator → Backend → Kafka → Spark Streaming → HDFS
+✅         ✅        ✅          ✅            ✅
+
 ### 분산 환경 HDFS 트러블슈팅 요약
 
 분산 환경에서 HDFS 구성 시 발생할 수 있는 문제들입니다.
@@ -1681,6 +2134,98 @@ docker exec namenode hdfs dfsadmin -report
 
 ---
 
+---
+
+#### 문제 9: network_mode: host에서 extra_hosts 무시됨
+
+**증상:**
+docker-compose.yml에 `extra_hosts` 설정했는데도 호스트명 해석 실패:
+```
+java.nio.channels.UnresolvedAddressException
+Starting thread to transfer blk_xxx to 192.168.55.9:9866
+```
+
+**원인:**
+- `network_mode: host` 사용 시 컨테이너가 호스트 네트워크 직접 사용
+- Docker의 `extra_hosts` 설정이 무시됨
+- 컨테이너가 호스트 PC의 `/etc/hosts` 파일을 직접 참조
+
+**해결:**
+Worker PC의 `/etc/hosts`에 직접 추가:
+```bash
+# 리눅스 A (192.168.55.158)에서
+echo "192.168.55.9 worker2" | sudo tee -a /etc/hosts
+echo "192.168.55.114 jun-Victus-by-HP-Gaming-Laptop-16-r0xxx.local" | sudo tee -a /etc/hosts
+
+# 리눅스 B (192.168.55.9)에서
+echo "192.168.55.158 worker1" | sudo tee -a /etc/hosts
+echo "192.168.55.114 jun-Victus-by-HP-Gaming-Laptop-16-r0xxx.local" | sudo tee -a /etc/hosts
+```
+
+---
+
+#### 문제 10: Spark Worker 자기 호스트명 해석 실패
+
+**증상:**
+```
+ERROR SparkUncaughtExceptionHandler: Uncaught exception in thread Thread[main,5,main]
+java.net.UnknownHostException: jun: jun: Try again
+    at java.net.InetAddress.getLocalHost(InetAddress.java:1507)
+    at org.apache.spark.util.Utils$.findLocalInetAddress(Utils.scala:1047)
+```
+
+**원인:**
+- Spark Worker가 시작 시 자신의 호스트명을 IP로 해석 시도
+- `network_mode: host` 사용 시 호스트 PC의 `/etc/hosts` 참조
+- `/etc/hosts`에 자기 자신의 호스트명이 없으면 실패
+
+**해결:**
+각 Worker PC의 `/etc/hosts`에 자기 자신의 호스트명 추가:
+```bash
+# 먼저 호스트명 확인
+hostname
+
+# /etc/hosts에 추가
+echo "127.0.0.1 $(hostname)" | sudo tee -a /etc/hosts
+```
+
+예시:
+```bash
+# 리눅스 A (hostname: jun)
+echo "127.0.0.1 jun" | sudo tee -a /etc/hosts
+
+# 리눅스 B (hostname: jun-mini1)
+echo "127.0.0.1 jun-mini1" | sudo tee -a /etc/hosts
+```
+
+---
+
+### 분산 환경 /etc/hosts 최종 설정
+
+각 PC별로 필요한 `/etc/hosts` 설정:
+
+**Master (192.168.55.114) - 노트북:**
+```
+# 기본 설정만으로 충분
+127.0.0.1 localhost
+```
+
+**Worker 1 (192.168.55.158) - 리눅스 A:**
+```
+127.0.0.1 localhost
+127.0.0.1 jun                                              # 자기 자신
+192.168.55.114 jun-Victus-by-HP-Gaming-Laptop-16-r0xxx.local  # Master
+192.168.55.9 worker2                                        # 다른 Worker
+```
+
+**Worker 2 (192.168.55.9) - 리눅스 B:**
+```
+127.0.0.1 localhost
+127.0.0.1 jun-mini1                                        # 자기 자신
+192.168.55.114 jun-Victus-by-HP-Gaming-Laptop-16-r0xxx.local  # Master
+192.168.55.158 worker1                                      # 다른 Worker
+```
+
 #### 문제 11: Spark Worker IPv6 호스트명 해석 실패
 
 **증상:**
@@ -1908,6 +2453,475 @@ DAG 파일 수정 후 Airflow가 자동으로 감지 (재시작 불필요)
 ```
 
 ---
+
+---
+
+## 🔧 Kubernetes 환경 트러블슈팅
+
+### 문제 14: Spark Master Service 이름 충돌
+
+**증상:**
+```
+ERROR SparkUncaughtExceptionHandler: Uncaught exception in thread Thread[main,5,main]
+java.lang.NumberFormatException: For input string: "tcp://10.43.220.131:8080"
+    at java.lang.NumberFormatException.forInputString(NumberFormatException.java:65)
+    at java.lang.Integer.parseInt(Integer.java:580)
+    at org.apache.spark.deploy.master.MasterArguments.<init>(MasterArguments.scala:46)
+```
+
+**원인:**
+- Kubernetes는 Service 생성 시 자동으로 환경변수를 주입함
+- Service 이름이 `spark-master`일 경우:
+    - `SPARK_MASTER_SERVICE_HOST=10.43.220.131`
+    - `SPARK_MASTER_SERVICE_PORT=tcp://10.43.220.131:8080`
+    - `SPARK_MASTER_PORT=tcp://10.43.220.131:7077`
+- Spark는 `SPARK_MASTER_PORT`를 숫자(포트 번호)로 파싱하려고 시도
+- `tcp://...` 문자열을 숫자로 변환 실패
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   환경변수 충돌 상황                          │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  Kubernetes 자동 주입:                                       │
+│  SPARK_MASTER_PORT=tcp://10.43.220.131:7077                 │
+│                                                              │
+│  Spark가 기대하는 값:                                        │
+│  SPARK_MASTER_PORT=7077                                      │
+│                                                              │
+│  → NumberFormatException 발생!                              │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**해결:**
+Service 이름을 변경하여 환경변수 충돌 방지:
+```yaml
+# 수정 전
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-master   # SPARK_MASTER_* 환경변수 자동 생성됨
+
+# 수정 후
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-master-svc   # SPARK_MASTER_SVC_* 환경변수 생성 (충돌 없음)
+```
+
+또한 명시적으로 포트 환경변수 설정:
+```yaml
+containers:
+  - name: spark-master
+    env:
+      - name: SPARK_MASTER_PORT
+        value: "7077"
+      - name: SPARK_MASTER_WEBUI_PORT
+        value: "8080"
+```
+
+**Spark Worker도 Service 주소 변경:**
+```yaml
+env:
+  - name: SPARK_MASTER
+    value: "spark://spark-master-svc.log-pipeline.svc.cluster.local:7077"
+```
+
+**Kubernetes Service 환경변수 규칙:**
+- Service 이름: `my-service`
+- 자동 생성 환경변수:
+    - `MY_SERVICE_SERVICE_HOST`
+    - `MY_SERVICE_SERVICE_PORT`
+    - `MY_SERVICE_PORT`
+
+애플리케이션이 특정 환경변수를 사용하는 경우, Service 이름이 충돌하지 않도록 주의!
+
+---
+
+### 문제 15: Airflow DAG 디렉토리 재귀 루프 오류
+
+**증상:**
+```
+RuntimeError: Detected recursive loop when walking DAG directory /opt/airflow/dags: 
+/opt/airflow/dags/..2026_01_12_01_22_40.195680184 has appeared more than once.
+ConnectionResetError: [Errno 104] Connection reset by peer
+```
+
+**원인:**
+- Kubernetes ConfigMap을 DAG 디렉토리에 직접 마운트
+- ConfigMap은 심볼릭 링크 구조로 파일 생성 (`..data` → `..2026_01_12_...`)
+- Airflow DAG 파서가 심볼릭 링크를 따라가면서 무한 루프 발생
+```
+┌─────────────────────────────────────────────────────────────┐
+│              ConfigMap 마운트 구조                           │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  /opt/airflow/dags/                                          │
+│  ├── ..2026_01_12_01_22_40.195680184/  (실제 데이터)        │
+│  │   └── manual_pipeline.py                                  │
+│  ├── ..data -> ..2026_01_12_01_22_40.195680184 (심볼릭링크) │
+│  └── manual_pipeline.py -> ..data/manual_pipeline.py        │
+│                                                              │
+│  Airflow가 디렉토리 스캔 시 심볼릭 링크 순환 감지 → 에러    │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**해결:**
+ConfigMap 직접 마운트 대신 initContainer로 DAG 파일 복사:
+```yaml
+# 수정 전: ConfigMap 직접 마운트 (문제 발생)
+volumes:
+  - name: dags
+    configMap:
+      name: airflow-dags
+containers:
+  - volumeMounts:
+      - name: dags
+        mountPath: /opt/airflow/dags
+
+# 수정 후: initContainer로 파일 복사
+initContainers:
+  - name: init-dags
+    image: busybox
+    command: ['sh', '-c', 'cat > /opt/airflow/dags/manual_pipeline.py << DAGEOF
+from airflow import DAG
+...
+DAGEOF']
+    volumeMounts:
+      - name: airflow-data
+        mountPath: /opt/airflow
+containers:
+  - name: airflow
+    volumeMounts:
+      - name: airflow-data
+        mountPath: /opt/airflow
+volumes:
+  - name: airflow-data
+    persistentVolumeClaim:
+      claimName: airflow-pvc
+```
+
+**initContainer 방식의 장점:**
+- 심볼릭 링크 없이 실제 파일로 복사
+- PVC에 저장되어 Pod 재시작 시에도 유지
+- Airflow DAG 파서가 정상적으로 파일 인식
+
+---
+
+### 문제 16: Airflow initContainer에서 DAG 디렉토리 생성 실패
+
+**증상:**
+```
+sh: can't create /opt/airflow/dags/manual_pipeline.py: nonexistent directory
+```
+
+**원인:**
+- PVC가 마운트되면 빈 디렉토리로 시작
+- `/opt/airflow/dags` 디렉토리가 존재하지 않음
+- ConfigMap의 init.sh 스크립트에서 `mkdir -p` 명령이 실행되지 않음
+```
+┌─────────────────────────────────────────────────────────────┐
+│              PVC 마운트 상태                                 │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  /opt/airflow/  (PVC 마운트 - 빈 디렉토리)                  │
+│  └── (없음)                                                  │
+│                                                              │
+│  cat > /opt/airflow/dags/manual_pipeline.py                 │
+│       ↓                                                      │
+│  ❌ /opt/airflow/dags/ 디렉토리 없음 → 실패                 │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**해결:**
+initContainer command에서 직접 mkdir 실행:
+```yaml
+initContainers:
+  - name: init-dags
+    image: busybox
+    command:
+      - sh
+      - -c
+      - |
+        mkdir -p /opt/airflow/dags
+        cat > /opt/airflow/dags/manual_pipeline.py << 'PYEND'
+        from airflow import DAG
+        ...
+        PYEND
+    volumeMounts:
+      - name: airflow-data
+        mountPath: /opt/airflow
+```
+
+**주의사항:**
+- ConfigMap을 별도 마운트하면 심볼릭 링크 문제 발생 가능 (문제 15 참조)
+- initContainer에서 직접 스크립트 실행이 더 안정적
+- heredoc 사용 시 들여쓰기 주의 (YAML과 shell 문법 충돌)
+
+---
+
+### 문제 17: Kafka Replication Factor 오류 (K8s 환경)
+
+**증상:**
+```
+Caused by: org.apache.kafka.common.errors.InvalidReplicationFactorException: 
+Unable to replicate the partition 2 time(s): The target replication factor of 2 
+cannot be reached because only 1 broker(s) are registered.
+```
+
+**원인:**
+- KafkaConfig.java에서 replicas(2)로 설정
+- K8s 환경에서는 Kafka broker가 1개만 실행
+- 복제 팩터가 broker 수보다 크면 토픽 생성 실패
+
+**해결:**
+KafkaConfig.java에서 replicas를 1로 변경:
+```java
+// 수정 전
+return TopicBuilder.name("logs.raw")
+        .partitions(3)
+        .replicas(2)
+        .build();
+
+// 수정 후
+return TopicBuilder.name("logs.raw")
+        .partitions(3)
+        .replicas(1)
+        .build();
+```
+
+이미지 재빌드 및 배포:
+```bash
+cd backend
+./gradlew build -x test
+docker build -t log-pipeline-backend:latest .
+docker save log-pipeline-backend:latest | sudo k3s ctr images import -
+kubectl rollout restart deployment/backend -n log-pipeline
+```
+
+---
+
+### 문제 18: Generator에서 Backend 연결 실패 (K8s 환경)
+
+**증상:**
+```
+ERROR:app.scheduler:Failed to send logs: All connection attempts failed
+```
+
+**원인:**
+- Generator의 config.py에서 backend_url이 localhost로 설정
+- K8s 환경에서는 Service DNS 이름 사용 필요
+
+**해결:**
+config.py에서 환경변수로 URL 주입 가능하도록 수정:
+```python
+# 수정 전
+backend_url: str = "http://localhost:8081"
+
+# 수정 후
+backend_url: str = os.getenv("BACKEND_URL", "http://localhost:8081")
+```
+
+K8s Deployment에서 환경변수 설정:
+```yaml
+env:
+  - name: BACKEND_URL
+    value: "http://backend-svc.log-pipeline.svc.cluster.local:8081"
+```
+
+---
+
+### 문제 19: Generator Settings 속성 누락
+
+**증상:**
+```
+AttributeError: 'Settings' object has no attribute 'services'
+```
+
+**원인:**
+- config.py 수정 시 기존 설정 속성들이 누락됨
+- log_generator.py에서 settings.services 참조
+
+**해결:**
+기존 설정을 유지하면서 K8s 환경변수만 추가:
+```python
+from pydantic_settings import BaseSettings
+import os
+
+class Settings(BaseSettings):
+    # Backend API 설정 - K8s 환경변수 우선
+    backend_url: str = os.getenv("BACKEND_URL", "http://localhost:8081")
+    backend_timeout: int = 30
+
+    # 배치 스케줄 설정
+    log_interval_seconds: int = 5
+    event_interval_seconds: int = 10
+    batch_size: int = 100
+
+    # 생성 데이터 설정 (누락되면 안됨!)
+    services: list = ["api-gateway", "user-service", "order-service", "payment-service"]
+    log_levels: list = ["INFO", "DEBUG", "WARN", "ERROR"]
+    event_types: list = ["CLICK", "VIEW", "PURCHASE", "LOGIN", "LOGOUT", "SEARCH"]
+
+    error_rate: float = 0.05
+
+    class Config:
+        env_file = ".env"
+        env_prefix = "GENERATOR_"
+
+settings = Settings()
+```
+
+**교훈:**
+설정 파일 수정 시 기존 속성을 모두 유지하면서 필요한 부분만 수정할 것!
+
+---
+
+### 문제 20: HDFS DataNode Cluster ID 불일치
+
+**증상:**
+```
+WARN common.Storage: Failed to add storage directory [DISK]file:/hadoop/dfs/data
+java.io.IOException: Incompatible clusterIDs in /hadoop/dfs/data: 
+namenode clusterID = CID-35773007-7d1d-4da8-ac6a-8e6c75978793; 
+datanode clusterID = CID-8054f9f7-1c5d-4c00-8049-964f104d0e96
+
+ERROR datanode.DataNode: Initialization failed for Block pool <registering>
+java.io.IOException: All specified directories have failed to load.
+```
+
+**원인:**
+- NameNode가 재생성되면서 새로운 Cluster ID 발급
+- DataNode는 기존 Cluster ID를 가진 데이터 보유
+- Cluster ID 불일치로 DataNode가 NameNode에 등록 실패
+```
+┌─────────────────────────────────────────────────────────────┐
+│                  Cluster ID 불일치 상황                      │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  NameNode (새로 생성)                                        │
+│  └─ Cluster ID: CID-35773007-...  (신규)                    │
+│                                                              │
+│  DataNode (기존 데이터 보유)                                 │
+│  └─ Cluster ID: CID-8054f9f7-...  (기존)                    │
+│                                                              │
+│  → ID 불일치 → DataNode 등록 실패 → CrashLoopBackOff        │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**해결:**
+DataNode의 기존 데이터를 삭제하여 새 Cluster ID로 초기화:
+```bash
+# Worker 1에서 (SSH 접속 후)
+sudo rm -rf /data/hdfs/datanode/*
+
+# Worker 2에서 (SSH 접속 후)
+sudo rm -rf /data/hdfs/datanode/*
+
+# DataNode 재시작
+kubectl rollout restart daemonset/datanode -n log-pipeline
+```
+
+**K8s 환경에서 데이터 경로:**
+- hostPath로 마운트된 경로: `/data/hdfs/datanode`
+- 이 경로는 Worker 노드의 로컬 파일시스템
+
+**확인:**
+```bash
+# DataNode 상태 확인
+kubectl get pods -n log-pipeline | grep datanode
+
+# HDFS 클러스터 상태 확인
+kubectl exec -n log-pipeline deployment/namenode -- hdfs dfsadmin -report
+```
+
+**예방:**
+- NameNode PVC를 삭제하지 않으면 Cluster ID 유지
+- NameNode 재생성 시에는 항상 DataNode 데이터도 함께 삭제
+- 프로덕션에서는 NameNode 메타데이터 백업 필수
+
+---
+
+### 문제 21: Spark Executor에서 Driver 호스트명 해석 실패 (K8s 환경)
+
+**증상:**
+```
+Executor finished with state EXITED message Command exited with code 1
+
+Caused by: java.io.IOException: Failed to connect to spark-master-5885b7bc-6lck4:33405
+Caused by: java.net.UnknownHostException: spark-master-5885b7bc-6lck4
+```
+
+**원인:**
+- Spark Master가 Driver URL에 Pod 이름 사용 (`spark-master-5885b7bc-6lck4`)
+- Worker에서 Pod 이름을 DNS로 해석 불가
+- K8s에서 Pod 이름은 자동으로 DNS에 등록되지 않음
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   호스트명 해석 실패                         │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  Spark Master (Pod: spark-master-5885b7bc-6lck4)            │
+│       │                                                      │
+│       │ Driver URL: spark://...@spark-master-5885b7bc-6lck4 │
+│       ▼                                                      │
+│  Spark Worker                                                │
+│       │                                                      │
+│       │ DNS 조회: spark-master-5885b7bc-6lck4               │
+│       ▼                                                      │
+│  ❌ UnknownHostException                                    │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**해결:**
+Headless Service + hostname/subdomain으로 Pod에 DNS 이름 부여:
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-master
+  namespace: log-pipeline
+spec:
+  template:
+    spec:
+      hostname: spark-master           # Pod hostname 지정
+      subdomain: spark-headless        # Headless Service와 연결
+      containers:
+        - name: spark-master
+          env:
+            - name: SPARK_PUBLIC_DNS
+              value: "spark-master.spark-headless.log-pipeline.svc.cluster.local"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-headless
+  namespace: log-pipeline
+spec:
+  selector:
+    app: spark-master
+  clusterIP: None      # Headless Service
+  ports:
+    - name: spark
+      port: 7077
+```
+
+**Headless Service 설명:**
+- `clusterIP: None`으로 설정
+- Pod에 직접 접근 가능한 DNS 생성
+- 형식: `{hostname}.{subdomain}.{namespace}.svc.cluster.local`
+- 예: `spark-master.spark-headless.log-pipeline.svc.cluster.local`
+
+**결과:**
+```
+INFO Master: Starting Spark master at spark://spark-master:7077
+INFO MasterWebUI: Bound MasterWebUI to spark-master.spark-headless.log-pipeline.svc.cluster.local:8080
+INFO Master: Registering worker 10.42.2.11:42481 with 8 cores, 14.1 GiB RAM
+```
 
 ### 분산 환경 IP 사용 요약
 
