@@ -1642,6 +1642,129 @@ spec:
 Generator → Backend → Kafka → Spark Streaming → HDFS
 ✅         ✅        ✅          ✅            ✅
 
+## 📊 벤치마크 결과
+
+### 개요
+
+PostgreSQL과 HDFS/Spark의 성능을 비교하는 벤치마크 테스트를 수행했습니다.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    벤치마크 테스트 요약                              │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  테스트 환경:                                                        │
+│  - Master: 노트북 (8GB RAM, 4 Core)                                 │
+│  - Worker: 리눅스 PC 2대 (각 4GB RAM, 2 Core)                       │
+│  - 스토리지: Master SSD, Worker HDD                                 │
+│                                                                      │
+│  테스트 데이터:                                                      │
+│  - Write 테스트: 최대 500만건                                       │
+│  - Read 테스트: 500만건 대상                                        │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### Write Performance 결과
+
+#### Phase 1: JPA saveAll() 방식
+
+| 부하 | 목표 | 실제 처리량 | 달성률 | 상태 |
+|------|------|------------|--------|------|
+| 9만건/분 | 9만 | 9만건/분 | 100% | ✅ |
+| 90만건/분 | 90만 | 90만건/분 | 100% | ✅ |
+| 900만건/분 | 90만 | **20만건/분** | 22% | ❌ |
+
+**병목 원인**: JPA IDENTITY 전략으로 인한 배치 비활성화
+- 상세: [BENCHMARK_WRITE_RESULT.md](docs/BENCHMARK_WRITE_RESULT.md)
+
+#### Phase 2: JDBC Batch 방식
+
+| 부하 | PostgreSQL | HDFS/Spark | 승자 |
+|------|------------|------------|------|
+| 90만건/분 | ✅ 안정 | ✅ 안정 | 무승부 |
+| 180만건/분 | ✅ 안정 | ✅ 안정 | 무승부 |
+| 360만건/분 | ✅ **동작** | ❌ **사망** | PostgreSQL |
+
+**개선 효과**: JPA → JDBC Batch로 **9배 성능 향상** (20만 → 180만건/분)
+- 상세: [BENCHMARK_WRITE_PHASE2.md](docs/BENCHMARK_WRITE_PHASE2.md)
+
+#### HDFS 사망 원인
+
+```
+Error: "2 datanode(s) running and 2 node(s) are excluded in this operation"
+원인: DataNode가 쓰기 속도를 못 따라가서 excluded 처리됨
+```
+
+- 트러블슈팅: [TROUBLESHOOTING_SPARK_STREAMING.md](docs/TROUBLESHOOTING_SPARK_STREAMING.md)
+
+---
+
+### Read Performance 결과 (500만건)
+
+| 테스트 유형 | PostgreSQL | HDFS | 배수 | 승자 |
+|-------------|------------|------|------|------|
+| COUNT(*) | 376ms | 4,396ms | **11.7x** | PostgreSQL |
+| GROUP BY | 584ms | 8,410ms | **14.4x** | PostgreSQL |
+| ORDER BY | 229ms | 20,969ms | **91.5x** | PostgreSQL |
+| 복잡한 집계 | 584ms | 8,058ms | **13.8x** | PostgreSQL |
+
+**안정성 비교**:
+| 지표 | PostgreSQL | HDFS |
+|------|------------|------|
+| 응답 시간 | 빠름 (200~600ms) | 느림 (4~21초) |
+| timeout 발생 | ⚠️ 있음 | ✅ 없음 |
+| 동시 부하 처리 | ⚠️ 불안정 | ✅ 안정적 |
+
+- 상세: [BENCHMARK_readPerformance.md](docs/BENCHMARK_readPerformance.md)
+
+---
+
+### 핵심 결론
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    핵심 발견                                         │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  1. 500만건 규모에서는 PostgreSQL이 압도적으로 빠름                 │
+│     - Write: 9배 빠름 (JDBC Batch 적용 시)                          │
+│     - Read: 10~90배 빠름                                            │
+│                                                                      │
+│  2. HDFS/Spark의 장점                                               │
+│     - 안정성: timeout 없이 일관된 응답                              │
+│     - 확장성: 노드 추가로 무한 확장 가능                            │
+│     - 비용: 콜드 데이터 저장 비용 절감 (HDD 사용)                   │
+│                                                                      │
+│  3. 시스템 선택 기준                                                │
+│     - < 1000만건: PostgreSQL 권장                                   │
+│     - > 1억건: HDFS/Spark 고려                                      │
+│     - 하이브리드: Hot(PostgreSQL) + Cold(HDFS) 조합                │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+- 시스템 선택 가이드: [WHY_HDFS_SPARK.md](docs/WHY_HDFS_SPARK.md)
+
+---
+
+### 벤치마크 문서 목록
+
+| 문서 | 설명 |
+|------|------|
+| [BENCHMARK.md](docs/BENCHMARK.md) | 벤치마크 개요 |
+| [BENCHMARK_WRITE_RESULT.md](docs/BENCHMARK_WRITE_RESULT.md) | Write Phase 1 결과 (JPA) |
+| [BENCHMARK_WRITE_PHASE2.md](docs/BENCHMARK_WRITE_PHASE2.md) | Write Phase 2 결과 (JDBC Batch) |
+| [BENCHMARK_WRITE_PHASE3.md](docs/BENCHMARK_WRITE_PHASE3.md) | Write Phase 3 계획 (리소스 확장) |
+| [BENCHMARK_readPerformance.md](docs/BENCHMARK_readPerformance.md) | Read 성능 테스트 결과 |
+| [WHY_HDFS_SPARK.md](docs/WHY_HDFS_SPARK.md) | 시스템 선택 가이드 |
+| [TROUBLESHOOTING_SPARK_STREAMING.md](docs/TROUBLESHOOTING_SPARK_STREAMING.md) | Spark Streaming 트러블슈팅 |
+
+---
+
+
 ### 분산 환경 HDFS 트러블슈팅 요약
 
 분산 환경에서 HDFS 구성 시 발생할 수 있는 문제들입니다.

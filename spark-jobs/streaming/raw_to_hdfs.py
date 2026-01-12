@@ -45,6 +45,7 @@ def main():
         .option("subscribe", "logs.raw") \
         .option("startingOffsets", "latest") \
         .option("failOnDataLoss", "false") \
+        .option("maxOffsetsPerTrigger", 30000) \
         .load()
 
     log_schema = get_log_schema()
