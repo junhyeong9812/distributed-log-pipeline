@@ -1,0 +1,91 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: airflow-pvc
+  namespace: log-pipeline
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow
+  namespace: log-pipeline
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: airflow
+  template:
+    metadata:
+      labels:
+        app: airflow
+    spec:
+      initContainers:
+        - name: init-dags
+          image: busybox
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /opt/airflow/dags
+              cat > /opt/airflow/dags/manual_pipeline.py << 'PYEND'
+              from airflow import DAG
+              from airflow.operators.bash import BashOperator
+              from datetime import datetime, timedelta
+              default_args = {"owner": "data-team", "depends_on_past": False, "start_date": datetime(2026, 1, 1), "retries": 1, "retry_delay": timedelta(minutes=5)}
+              dag = DAG("manual_log_pipeline", default_args=default_args, description="Manual log pipeline", schedule_interval=None, catchup=False, tags=["batch", "logs", "manual"])
+              daily_report = BashOperator(task_id="daily_report", bash_command="echo Daily report task", dag=dag)
+              service_analysis = BashOperator(task_id="service_analysis", bash_command="echo Service analysis task", dag=dag)
+              daily_report >> service_analysis
+              PYEND
+          volumeMounts:
+            - name: airflow-data
+              mountPath: /opt/airflow
+      containers:
+        - name: airflow
+          image: apache/airflow:2.7.0-python3.10
+          ports:
+            - containerPort: 8080
+          env:
+            - name: AIRFLOW__CORE__EXECUTOR
+              value: "SequentialExecutor"
+            - name: AIRFLOW__DATABASE__SQL_ALCHEMY_CONN
+              value: "sqlite:////opt/airflow/airflow.db"
+            - name: AIRFLOW__CORE__FERNET_KEY
+              value: "46BKJoQYlPPOexq0OhDZnIlNepKFf87WFwLbfzqDDho="
+            - name: AIRFLOW__CORE__LOAD_EXAMPLES
+              value: "False"
+            - name: AIRFLOW__WEBSERVER__SECRET_KEY
+              value: "mysecretkey123"
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              airflow db init &&
+              airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com || true &&
+              (airflow webserver &) &&
+              airflow scheduler
+          volumeMounts:
+            - name: airflow-data
+              mountPath: /opt/airflow
+      volumes:
+        - name: airflow-data
+          persistentVolumeClaim:
+            claimName: airflow-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: airflow-svc
+  namespace: log-pipeline
+spec:
+  selector:
+    app: airflow
+  ports:
+    - port: 8080
+      targetPort: 8080
+  type: ClusterIP
