@@ -6,10 +6,9 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.kafka.core.KafkaTemplate;
-import org.springframework.kafka.support.SendResult;
 import org.springframework.stereotype.Service;
 
-import java.util.concurrent.CompletableFuture;
+import java.util.List;
 
 @Slf4j
 @Service
@@ -27,45 +26,25 @@ public class KafkaProducerService {
     @Value("${kafka.topics.alerts}")
     private String alertsTopic;
 
-    public void sendLog(LogEvent logEvent) {
+    public void sendLogAsync(LogEvent logEvent) {
         String key = logEvent.getService();
+        kafkaTemplate.send(logsTopic, key, logEvent);
         
-        CompletableFuture<SendResult<String, Object>> future = 
-                kafkaTemplate.send(logsTopic, key, logEvent);
-
-        future.whenComplete((result, ex) -> {
-            if (ex == null) {
-                log.debug("Log sent: topic={}, partition={}, offset={}",
-                        result.getRecordMetadata().topic(),
-                        result.getRecordMetadata().partition(),
-                        result.getRecordMetadata().offset());
-            } else {
-                log.error("Failed to send log: {}", ex.getMessage());
-            }
-        });
-
-        // ERROR 레벨이면 알림 토픽에도 발행
         if ("ERROR".equalsIgnoreCase(logEvent.getLevel())) {
             kafkaTemplate.send(alertsTopic, key, logEvent);
-            log.info("Alert sent for ERROR log: service={}", logEvent.getService());
         }
     }
 
-    public void sendActivity(ActivityEvent activityEvent) {
+    public void sendLogsAsync(List<LogEvent> logEvents) {
+        logEvents.forEach(this::sendLogAsync);
+    }
+
+    public void sendActivityAsync(ActivityEvent activityEvent) {
         String key = activityEvent.getUserId();
+        kafkaTemplate.send(eventsTopic, key, activityEvent);
+    }
 
-        CompletableFuture<SendResult<String, Object>> future = 
-                kafkaTemplate.send(eventsTopic, key, activityEvent);
-
-        future.whenComplete((result, ex) -> {
-            if (ex == null) {
-                log.debug("Activity sent: topic={}, partition={}, offset={}",
-                        result.getRecordMetadata().topic(),
-                        result.getRecordMetadata().partition(),
-                        result.getRecordMetadata().offset());
-            } else {
-                log.error("Failed to send activity: {}", ex.getMessage());
-            }
-        });
+    public void sendActivitiesAsync(List<ActivityEvent> activityEvents) {
+        activityEvents.forEach(this::sendActivityAsync);
     }
 }

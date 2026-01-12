@@ -1,16 +1,18 @@
 package com.pipeline.service;
 
-import com.pipeline.entity.EventEntity;
-import com.pipeline.entity.LogEntity;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.pipeline.model.ActivityEvent;
 import com.pipeline.model.LogEvent;
-import com.pipeline.repository.EventRepository;
-import com.pipeline.repository.LogRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.jdbc.core.BatchPreparedStatementSetter;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
 import java.util.List;
 
 @Slf4j
@@ -18,89 +20,106 @@ import java.util.List;
 @RequiredArgsConstructor
 public class DataService {
 
-    private final LogRepository logRepository;
-    private final EventRepository eventRepository;
+    private final JdbcTemplate jdbcTemplate;
     private final KafkaProducerService kafkaProducerService;
+    private final ObjectMapper objectMapper;
+
+    private String toJson(Object obj) {
+        if (obj == null) return "{}";
+        try {
+            return objectMapper.writeValueAsString(obj);
+        } catch (JsonProcessingException e) {
+            return "{}";
+        }
+    }
 
     @Transactional
     public void processLog(LogEvent logEvent) {
-        // 1. PostgreSQL 저장
-        LogEntity entity = LogEntity.builder()
-                .timestamp(logEvent.getTimestamp().toEpochMilli() / 1000.0)
-                .level(logEvent.getLevel())
-                .service(logEvent.getService())
-                .host(logEvent.getHost())
-                .message(logEvent.getMessage())
-                .metadata(logEvent.getMetadata())
-                .build();
+        String sql = "INSERT INTO logs (timestamp, level, service, host, message, metadata, created_at) " +
+                     "VALUES (?, ?, ?, ?, ?, ?::jsonb, NOW())";
         
-        logRepository.save(entity);
-        log.debug("Log saved to PostgreSQL: id={}", entity.getId());
+        jdbcTemplate.update(sql,
+                logEvent.getTimestamp().toEpochMilli() / 1000.0,
+                logEvent.getLevel(),
+                logEvent.getService(),
+                logEvent.getHost(),
+                logEvent.getMessage(),
+                toJson(logEvent.getMetadata())
+        );
 
-        // 2. Kafka 발행
-        kafkaProducerService.sendLog(logEvent);
+        kafkaProducerService.sendLogAsync(logEvent);
     }
 
     @Transactional
     public void processLogs(List<LogEvent> logEvents) {
-        // 1. PostgreSQL 배치 저장
-        List<LogEntity> entities = logEvents.stream()
-                .map(event -> LogEntity.builder()
-                        .timestamp(event.getTimestamp().toEpochMilli() / 1000.0)
-                        .level(event.getLevel())
-                        .service(event.getService())
-                        .host(event.getHost())
-                        .message(event.getMessage())
-                        .metadata(event.getMetadata())
-                        .build())
-                .toList();
+        String sql = "INSERT INTO logs (timestamp, level, service, host, message, metadata, created_at) " +
+                     "VALUES (?, ?, ?, ?, ?, ?::jsonb, NOW())";
         
-        logRepository.saveAll(entities);
-        log.debug("Saved {} logs to PostgreSQL", entities.size());
+        jdbcTemplate.batchUpdate(sql, new BatchPreparedStatementSetter() {
+            @Override
+            public void setValues(PreparedStatement ps, int i) throws SQLException {
+                LogEvent event = logEvents.get(i);
+                ps.setDouble(1, event.getTimestamp().toEpochMilli() / 1000.0);
+                ps.setString(2, event.getLevel());
+                ps.setString(3, event.getService());
+                ps.setString(4, event.getHost());
+                ps.setString(5, event.getMessage());
+                ps.setString(6, toJson(event.getMetadata()));
+            }
+            
+            @Override
+            public int getBatchSize() {
+                return logEvents.size();
+            }
+        });
 
-        // 2. Kafka 발행
-        logEvents.forEach(kafkaProducerService::sendLog);
+        log.debug("Batch inserted {} logs", logEvents.size());
+        kafkaProducerService.sendLogsAsync(logEvents);
     }
 
     @Transactional
     public void processActivity(ActivityEvent activityEvent) {
-        // 1. PostgreSQL 저장
-        EventEntity entity = EventEntity.builder()
-                .eventId(activityEvent.getEventId())
-                .timestamp(activityEvent.getTimestamp().toEpochMilli() / 1000.0)
-                .userId(activityEvent.getUserId())
-                .sessionId(activityEvent.getSessionId())
-                .eventType(activityEvent.getEventType())
-                .eventData(activityEvent.getEventData())
-                .device(activityEvent.getDevice())
-                .build();
+        String sql = "INSERT INTO events (event_id, timestamp, user_id, session_id, event_type, event_data, device, created_at) " +
+                     "VALUES (?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, NOW())";
         
-        eventRepository.save(entity);
-        log.debug("Event saved to PostgreSQL: id={}", entity.getId());
+        jdbcTemplate.update(sql,
+                activityEvent.getEventId(),
+                activityEvent.getTimestamp().toEpochMilli() / 1000.0,
+                activityEvent.getUserId(),
+                activityEvent.getSessionId(),
+                activityEvent.getEventType(),
+                toJson(activityEvent.getEventData()),
+                toJson(activityEvent.getDevice())
+        );
 
-        // 2. Kafka 발행
-        kafkaProducerService.sendActivity(activityEvent);
+        kafkaProducerService.sendActivityAsync(activityEvent);
     }
 
     @Transactional
     public void processActivities(List<ActivityEvent> activityEvents) {
-        // 1. PostgreSQL 배치 저장
-        List<EventEntity> entities = activityEvents.stream()
-                .map(event -> EventEntity.builder()
-                        .eventId(event.getEventId())
-                        .timestamp(event.getTimestamp().toEpochMilli() / 1000.0)
-                        .userId(event.getUserId())
-                        .sessionId(event.getSessionId())
-                        .eventType(event.getEventType())
-                        .eventData(event.getEventData())
-                        .device(event.getDevice())
-                        .build())
-                .toList();
+        String sql = "INSERT INTO events (event_id, timestamp, user_id, session_id, event_type, event_data, device, created_at) " +
+                     "VALUES (?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, NOW())";
         
-        eventRepository.saveAll(entities);
-        log.debug("Saved {} events to PostgreSQL", entities.size());
+        jdbcTemplate.batchUpdate(sql, new BatchPreparedStatementSetter() {
+            @Override
+            public void setValues(PreparedStatement ps, int i) throws SQLException {
+                ActivityEvent event = activityEvents.get(i);
+                ps.setString(1, event.getEventId());
+                ps.setDouble(2, event.getTimestamp().toEpochMilli() / 1000.0);
+                ps.setString(3, event.getUserId());
+                ps.setString(4, event.getSessionId());
+                ps.setString(5, event.getEventType());
+                ps.setString(6, toJson(event.getEventData()));
+                ps.setString(7, toJson(event.getDevice()));
+            }
+            
+            @Override
+            public int getBatchSize() {
+                return activityEvents.size();
+            }
+        });
 
-        // 2. Kafka 발행
-        activityEvents.forEach(kafkaProducerService::sendActivity);
+        log.debug("Batch inserted {} events", activityEvents.size());
+        kafkaProducerService.sendActivitiesAsync(activityEvents);
     }
 }
