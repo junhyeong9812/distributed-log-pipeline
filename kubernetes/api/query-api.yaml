@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: query-api
+  namespace: log-pipeline
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: query-api
+  template:
+    metadata:
+      labels:
+        app: query-api
+    spec:
+      containers:
+        - name: query-api
+          image: log-pipeline-api:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8000
+          env:
+            - name: POSTGRES_HOST
+              value: "postgres-svc.log-pipeline.svc.cluster.local"
+            - name: POSTGRES_PORT
+              value: "5432"
+            - name: POSTGRES_DB
+              value: "logs"
+            - name: POSTGRES_USER
+              value: "admin"
+            - name: POSTGRES_PASSWORD
+              value: "admin123"
+            - name: HDFS_URL
+              value: "hdfs://namenode.log-pipeline.svc.cluster.local:9000"
+            - name: HDFS_PATH
+              value: "hdfs://namenode.log-pipeline.svc.cluster.local:9000/data/logs/raw"
+            - name: SPARK_MASTER
+              value: "local[*]"
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: query-api-svc
+  namespace: log-pipeline
+spec:
+  selector:
+    app: query-api
+  ports:
+    - port: 8000
+      targetPort: 8000
+  type: ClusterIP
