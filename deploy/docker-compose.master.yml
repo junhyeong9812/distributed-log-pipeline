@@ -21,6 +21,21 @@ services:
     networks:
       - pipeline-network
 
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=logs
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=admin123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - pipeline-network
+
   backend:
     build:
       context: ../backend
@@ -30,8 +45,12 @@ services:
       - "8081:8081"
     environment:
       - KAFKA_SERVERS=192.168.55.114:9092
+      - POSTGRES_URL=jdbc:postgresql://postgres:5432/logs
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=admin123
     depends_on:
       - kafka
+      - postgres
     networks:
       - pipeline-network
 
@@ -41,7 +60,7 @@ services:
       dockerfile: Dockerfile
     container_name: generator
     ports:
-      - "8000:8000"
+      - "8085:8000"
     environment:
       - GENERATOR_BACKEND_URL=http://192.168.55.114:8081
       - GENERATOR_LOG_INTERVAL_SECONDS=5
@@ -49,6 +68,26 @@ services:
       - GENERATOR_BATCH_SIZE=100
     depends_on:
       - backend
+    networks:
+      - pipeline-network
+
+  query-api:
+    image: log-pipeline-api:latest
+    container_name: query-api
+    ports:
+      - "8000:8000"
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=logs
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=admin123
+      - HDFS_URL=hdfs://192.168.55.114:9000
+      - HDFS_PATH=hdfs://192.168.55.114:9000/data/logs/raw
+      - SPARK_MASTER=local[*]
+    depends_on:
+      - postgres
+      - namenode
     networks:
       - pipeline-network
 
@@ -146,6 +185,7 @@ services:
 
 volumes:
   kafka_data:
+  postgres_data:
   namenode_data:
   prometheus_data:
   grafana_data:

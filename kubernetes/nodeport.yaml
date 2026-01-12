@@ -68,3 +68,17 @@ spec:
       targetPort: 8000
       nodePort: 30800
   type: NodePort
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: query-api-external
+  namespace: log-pipeline
+spec:
+  selector:
+    app: query-api
+  ports:
+    - port: 8000
+      targetPort: 8000
+      nodePort: 30801
+  type: NodePort
