@@ -2923,6 +2923,43 @@ INFO MasterWebUI: Bound MasterWebUI to spark-master.spark-headless.log-pipeline.
 INFO Master: Registering worker 10.42.2.11:42481 with 8 cores, 14.1 GiB RAM
 ```
 
+---
+
+## 🗑️ Kubernetes 리소스 관리
+
+### Namespace 삭제 시 영향 범위
+```
+삭제되는 것 (namespace 삭제):
+├── Pod들 (Kafka, HDFS, Spark, Backend 등)
+├── Service들
+├── Deployment들
+├── ConfigMap들
+└── PVC들 (데이터)
+
+유지되는 것:
+├── k3s 클러스터 자체
+├── Master 노드 (k3s server)
+├── Worker 노드들 (k3s agent) ✅
+└── Worker의 로컬 데이터 (/data/hdfs/datanode)
+```
+
+### 전체 리소스 정리
+```bash
+# Namespace 삭제 (모든 리소스 정리)
+kubectl delete namespace log-pipeline
+
+# 노드 상태 확인 (Worker 연결 유지됨)
+kubectl get nodes
+```
+
+### Worker 로컬 데이터 정리 (필요시)
+
+HDFS Cluster ID 불일치 등 문제 발생 시 Worker 노드에서 실행:
+```bash
+# Worker 1, 2에서 각각 실행
+sudo rm -rf /data/hdfs/datanode/*
+```
+
 ### 분산 환경 IP 사용 요약
 
 `network_mode: host` 사용 시 Docker 서비스명 대신 실제 IP를 사용해야 하는 곳:

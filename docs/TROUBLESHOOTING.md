@@ -744,3 +744,127 @@ kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic <topic> --fr
 # 로그 확인
 # Worker의 /spark/work/<app-id>/<executor-id>/stderr
 ```
+
+---
+
+### 문제 22: Docker 멀티스테이지 빌드 COPY 실패
+
+**증상:**
+```
+COPY --from=build /app/build/libs/*.jar app.jar
+When using COPY with more than one source file, the destination must be a directory and end with a /
+```
+
+**원인:**
+- Docker COPY 명령어에서 와일드카드(`*.jar`) 사용 시 여러 파일 매칭 가능
+- 여러 파일을 단일 파일명(`app.jar`)으로 복사 불가
+- 빌드 결과물이 여러 jar 파일일 수 있음
+
+**해결:**
+Dockerfile에서 정확한 jar 파일명 지정:
+```dockerfile
+# 수정 전
+COPY --from=build /app/build/libs/*.jar app.jar
+
+# 수정 후
+COPY --from=build /app/build/libs/pipeline-0.0.1-SNAPSHOT.jar app.jar
+```
+
+**전체 Dockerfile:**
+```dockerfile
+FROM eclipse-temurin:17-jdk-alpine AS build
+
+WORKDIR /app
+
+COPY gradle/ gradle/
+COPY gradlew .
+COPY build.gradle .
+COPY settings.gradle .
+COPY src/ src/
+
+RUN chmod +x gradlew
+RUN ./gradlew build -x test
+
+FROM eclipse-temurin:17-jre-alpine
+
+WORKDIR /app
+
+COPY --from=build /app/build/libs/pipeline-0.0.1-SNAPSHOT.jar app.jar
+
+EXPOSE 8081
+
+ENTRYPOINT ["java", "-jar", "app.jar"]
+```
+
+**재빌드:**
+```bash
+cd ~/project/distributed-log-pipeline/backend
+docker build --no-cache -t log-pipeline-backend:latest .
+docker save log-pipeline-backend:latest | sudo k3s ctr images import -
+kubectl rollout restart deployment/backend -n log-pipeline
+```
+
+---
+
+### 문제 23: Backend PostgreSQL 환경변수 누락 (K8s)
+
+**증상:**
+- Backend 로그에 JPA/Hibernate 초기화 로그 없음
+- PostgreSQL에 데이터 저장 안 됨
+- Kafka만 동작
+
+**원인:**
+- backend.yaml에 PostgreSQL 관련 환경변수 미설정
+- Spring Boot가 datasource 설정 없이 시작
+
+**확인:**
+```bash
+kubectl describe pod -n log-pipeline -l app=backend | grep -A 20 "Environment:"
+# SPRING_DATASOURCE_URL 없음
+```
+
+**해결:**
+backend.yaml에 환경변수 추가:
+```yaml
+env:
+  - name: SPRING_KAFKA_BOOTSTRAP_SERVERS
+    value: "kafka.log-pipeline.svc.cluster.local:9092"
+  - name: SPRING_DATASOURCE_URL
+    value: "jdbc:postgresql://postgres-svc.log-pipeline.svc.cluster.local:5432/logs"
+  - name: SPRING_DATASOURCE_USERNAME
+    value: "admin"
+  - name: SPRING_DATASOURCE_PASSWORD
+    value: "admin123"
+  - name: SPRING_JPA_HIBERNATE_DDL_AUTO
+    value: "update"
+```
+
+**재배포:**
+```bash
+kubectl apply -f ~/project/distributed-log-pipeline/kubernetes/apps/backend.yaml
+kubectl rollout restart deployment/backend -n log-pipeline
+```
+
+**확인:**
+```bash
+kubectl logs -n log-pipeline deployment/backend | grep -i hikari
+# HikariPool-1 - Start completed. 출력되면 성공
+```
+```
+
+---
+
+## 다음 단계 정리
+```
+현재 상태:
+✅ PostgreSQL 저장 동작
+✅ Kafka 저장 동작
+⬜ HDFS 저장 (Spark Streaming 실행 필요)
+⬜ Query API 테스트
+⬜ k6 부하 테스트
+
+순서:
+1. Spark Streaming 실행 → HDFS 저장
+2. Query API 동작 확인
+3. k6 스크립트 작성 및 테스트
+4. 대용량 데이터 테스트 (Generator 속도 조절)
