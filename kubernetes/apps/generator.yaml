@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: generator
+  namespace: log-pipeline
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: generator
+  template:
+    metadata:
+      labels:
+        app: generator
+    spec:
+      containers:
+        - name: generator
+          image: log-pipeline-generator:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8000
+          env:
+            - name: BACKEND_URL
+              value: "http://backend-svc.log-pipeline.svc.cluster.local:8081"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: generator-svc
+  namespace: log-pipeline
+spec:
+  selector:
+    app: generator
+  ports:
+    - port: 8000
+      targetPort: 8000
+  type: ClusterIP
