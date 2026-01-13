@@ -130,7 +130,7 @@ sys	0m0.007s
 real	0m8.612s
 user	0m0.022s
 sys	0m0.007s
-(base) jun@jun-Victus-by-HP-Gaming-Laptop-16-r0xxx:~$ 
+(base) jun@jun-Victus-by-HP-Gaming-Laptop-16-r0xxx:~$ `
 
 ```
 
