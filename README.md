@@ -64,6 +64,18 @@
 | HDFS 집계 쿼리 | 2 | 0% | 8.0초 | ✅ PASS |
 | HDFS 로그 조회 | 2 | 0% | 156.8초 | ✅ PASS |
 
+### 데이터 실 수치
+<img width="744" height="716" alt="image" src="https://github.com/user-attachments/assets/6a3728df-82a8-4036-b895-12168e569764" />
+
+### 100만건 데이터 저장 시 자원
+<img width="744" height="716" alt="image" src="https://github.com/user-attachments/assets/f7830656-c8d0-4f42-a6bd-74a417cc6f96" />
+크롬이 더먹네 
+### 기본 조회 속도
+<img width="930" height="630" alt="image" src="https://github.com/user-attachments/assets/73830a4e-7dc3-4fdb-a422-94349480c16b" />
+### 도커 컴포즈 시 구축되어있던 환경
+<img width="1817" height="978" alt="image" src="https://github.com/user-attachments/assets/cf327f4b-b409-460d-8f9d-3d996e1912c7" />
+
+
 ---
 
 ## 🔑 핵심 결론
