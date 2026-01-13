@@ -19,21 +19,71 @@ class HDFSQueryClient:
             self.spark.sparkContext.setLogLevel("WARN")
         return self.spark
     
+    # def query_logs(
+    #     self,
+    #     level: Optional[str] = None,
+    #     service: Optional[str] = None,
+    #     start_time: Optional[float] = None,
+    #     end_time: Optional[float] = None,
+    #     limit: int = 100,
+    #     order_by: str = "timestamp",
+    #     order_dir: str = "desc"
+    # ):
+    #     try:
+    #         spark = self._get_spark()
+    #
+    #         df = spark.read.parquet(self.hdfs_path)
+    #
+    #         # 필터링
+    #         if level:
+    #             df = df.filter(col("level") == level)
+    #         if service:
+    #             df = df.filter(col("service") == service)
+    #         if start_time:
+    #             df = df.filter(col("timestamp") >= start_time)
+    #         if end_time:
+    #             df = df.filter(col("timestamp") <= end_time)
+    #
+    #         total_count = df.count()
+    #
+    #         # 정렬
+    #         if order_dir.lower() == "desc":
+    #             df = df.orderBy(desc(order_by))
+    #         else:
+    #             df = df.orderBy(asc(order_by))
+    #
+    #         # 제한
+    #         rows = df.limit(limit).collect()
+    #
+    #         return {
+    #             "source": "hdfs",
+    #             "total_count": total_count,
+    #             "returned_count": len(rows),
+    #             "data": [row.asDict() for row in rows]
+    #         }
+    #     except Exception as e:
+    #         return {
+    #             "source": "hdfs",
+    #             "error": str(e),
+    #             "total_count": 0,
+    #             "returned_count": 0,
+    #             "data": []
+    #         }
     def query_logs(
-        self,
-        level: Optional[str] = None,
-        service: Optional[str] = None,
-        start_time: Optional[float] = None,
-        end_time: Optional[float] = None,
-        limit: int = 100,
-        order_by: str = "timestamp",
-        order_dir: str = "desc"
+            self,
+            level: Optional[str] = None,
+            service: Optional[str] = None,
+            start_time: Optional[float] = None,
+            end_time: Optional[float] = None,
+            limit: int = 100,
+            order_by: str = "timestamp",
+            order_dir: str = "desc",
+            include_total: bool = False  # 선택적 total_count
     ):
         try:
             spark = self._get_spark()
-            
             df = spark.read.parquet(self.hdfs_path)
-            
+
             # 필터링
             if level:
                 df = df.filter(col("level") == level)
@@ -43,18 +93,18 @@ class HDFSQueryClient:
                 df = df.filter(col("timestamp") >= start_time)
             if end_time:
                 df = df.filter(col("timestamp") <= end_time)
-            
-            total_count = df.count()
-            
-            # 정렬
+
+            # total_count는 선택적으로 (기본 비활성화)
+            total_count = df.count() if include_total else -1
+
+            # 정렬 + limit (Spark가 최적화)
             if order_dir.lower() == "desc":
                 df = df.orderBy(desc(order_by))
             else:
                 df = df.orderBy(asc(order_by))
-            
-            # 제한
+
             rows = df.limit(limit).collect()
-            
+
             return {
                 "source": "hdfs",
                 "total_count": total_count,

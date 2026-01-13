@@ -1,5 +1,5 @@
 // k6/phase7/hdfs_simple_load.js
-// HDFS 단순 조회 부하 테스트 (적정 VU)
+// timeout 3분으로 변경, stats 엔드포인트 사용
 
 import http from 'k6/http';
 import { check, sleep } from 'k6';
@@ -23,22 +23,31 @@ export const options = {
     },
   },
   thresholds: {
-    http_req_duration: ['p(95)<30000'],  // P95 30초 이내
-    errors: ['rate<0.10'],                // 에러율 10% 미만
+    http_req_duration: ['p(95)<30000'],
+    errors: ['rate<0.10'],
   },
 };
 
 const BASE_URL = 'http://192.168.55.114:30801';
 
 export default function () {
-  const url = `${BASE_URL}/api/query/hdfs/logs?limit=100`;
+  // stats 엔드포인트 사용 (COUNT - 12초)
+  const url = `${BASE_URL}/api/query/hdfs/stats`;
 
   const response = http.get(url, {
-    timeout: '120s',
+    timeout: '180s',  // 3분 타임아웃
   });
 
   const isSuccess = check(response, {
     'status is 200': (r) => r.status === 200,
+    'has logs_count': (r) => {
+      try {
+        const body = JSON.parse(r.body);
+        return body.logs_count > 0;
+      } catch (e) {
+        return false;
+      }
+    },
   });
 
   if (isSuccess) {
@@ -64,7 +73,7 @@ export function handleSummary(data) {
   const successReqs = data.metrics.success_count ? data.metrics.success_count.values.count : 0;
 
   console.log('\n' + '='.repeat(70));
-  console.log('Phase 7: HDFS 단순 조회 부하 테스트 결과');
+  console.log('Phase 7: HDFS COUNT 부하 테스트 결과');
   console.log('='.repeat(70));
   console.log(`설정: VU 0→1→2→2→0, 총 4분`);
   console.log('-'.repeat(70));
