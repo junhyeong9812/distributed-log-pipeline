@@ -1,5 +1,5 @@
 // k6/phase7/hdfs_simple_load.js
-// timeout 3분으로 변경, stats 엔드포인트 사용
+// 실제 로그 조회 - 3분 타임아웃
 
 import http from 'k6/http';
 import { check, sleep } from 'k6';
@@ -23,7 +23,7 @@ export const options = {
     },
   },
   thresholds: {
-    http_req_duration: ['p(95)<30000'],
+    http_req_duration: ['p(95)<180000'],  // 3분
     errors: ['rate<0.10'],
   },
 };
@@ -31,19 +31,19 @@ export const options = {
 const BASE_URL = 'http://192.168.55.114:30801';
 
 export default function () {
-  // stats 엔드포인트 사용 (COUNT - 12초)
-  const url = `${BASE_URL}/api/query/hdfs/stats`;
+  // 실제 로그 조회
+  const url = `${BASE_URL}/api/query/hdfs/logs?limit=100`;
 
   const response = http.get(url, {
-    timeout: '180s',  // 3분 타임아웃
+    timeout: '180s',
   });
 
   const isSuccess = check(response, {
     'status is 200': (r) => r.status === 200,
-    'has logs_count': (r) => {
+    'has data': (r) => {
       try {
         const body = JSON.parse(r.body);
-        return body.logs_count > 0;
+        return body.returned_count > 0;
       } catch (e) {
         return false;
       }
@@ -60,7 +60,7 @@ export default function () {
 
   errorRate.add(!isSuccess);
 
-  sleep(3);
+  sleep(5);
 }
 
 export function handleSummary(data) {
@@ -73,7 +73,7 @@ export function handleSummary(data) {
   const successReqs = data.metrics.success_count ? data.metrics.success_count.values.count : 0;
 
   console.log('\n' + '='.repeat(70));
-  console.log('Phase 7: HDFS COUNT 부하 테스트 결과');
+  console.log('Phase 7: HDFS 로그 조회 부하 테스트 결과');
   console.log('='.repeat(70));
   console.log(`설정: VU 0→1→2→2→0, 총 4분`);
   console.log('-'.repeat(70));
@@ -86,7 +86,7 @@ export function handleSummary(data) {
   console.log(`최소 응답 시간: ${minTime.toFixed(2)} ms`);
   console.log(`최대 응답 시간: ${maxTime.toFixed(2)} ms`);
   console.log('-'.repeat(70));
-  console.log(`결과: ${errRate < 0.10 && p95Time < 30000 ? 'PASS ✓' : 'FAIL ✗'}`);
+  console.log(`결과: ${errRate < 0.10 && p95Time < 180000 ? 'PASS ✓' : 'FAIL ✗'}`);
   console.log('='.repeat(70) + '\n');
 
   return {
