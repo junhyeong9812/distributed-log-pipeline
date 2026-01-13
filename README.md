@@ -2,8 +2,6 @@
 
 > Kubernetes 기반 분산 로그 파이프라인 - PostgreSQL vs HDFS+Spark 성능 비교 실험
 
-<사진>
-
 ---
 
 ## 📋 프로젝트 개요
