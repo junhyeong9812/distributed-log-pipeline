@@ -5,6 +5,10 @@ spring:
   application:
     name: log-collector
 
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.kafka.KafkaAutoConfiguration
+
   datasource:
     url: ${POSTGRES_URL:jdbc:postgresql://localhost:5432/logs}
     username: ${POSTGRES_USER:admin}
@@ -24,21 +28,21 @@ spring:
         order_inserts: true
         order_updates: true
 
-  kafka:
-    bootstrap-servers: ${KAFKA_SERVERS:localhost:9092}
-    producer:
-      key-serializer: org.apache.kafka.common.serialization.StringSerializer
-      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
-      acks: all
-      retries: 3
-      properties:
-        enable.idempotence: true
+#  kafka:
+#    bootstrap-servers: ${KAFKA_SERVERS:localhost:9092}
+#    producer:
+#      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+#      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+#      acks: all
+#      retries: 3
+#      properties:
+#        enable.idempotence: true
 
-kafka:
-  topics:
-    logs: logs.raw
-    events: events.activity
-    alerts: alerts.realtime
+#kafka:
+#  topics:
+#    logs: logs.raw
+#    events: events.activity
+#    alerts: alerts.realtime
 
 management:
   endpoints:

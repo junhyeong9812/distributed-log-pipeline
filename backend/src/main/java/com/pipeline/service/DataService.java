@@ -21,7 +21,7 @@ import java.util.List;
 public class DataService {
 
     private final JdbcTemplate jdbcTemplate;
-    private final KafkaProducerService kafkaProducerService;
+    // private final KafkaProducerService kafkaProducerService;
     private final ObjectMapper objectMapper;
 
     private String toJson(Object obj) {
@@ -36,8 +36,8 @@ public class DataService {
     @Transactional
     public void processLog(LogEvent logEvent) {
         String sql = "INSERT INTO logs (timestamp, level, service, host, message, metadata, created_at) " +
-                     "VALUES (?, ?, ?, ?, ?, ?::jsonb, NOW())";
-        
+                "VALUES (?, ?, ?, ?, ?, ?::jsonb, NOW())";
+
         jdbcTemplate.update(sql,
                 logEvent.getTimestamp().toEpochMilli() / 1000.0,
                 logEvent.getLevel(),
@@ -47,14 +47,14 @@ public class DataService {
                 toJson(logEvent.getMetadata())
         );
 
-        kafkaProducerService.sendLogAsync(logEvent);
+        // kafkaProducerService.sendLogAsync(logEvent);
     }
 
     @Transactional
     public void processLogs(List<LogEvent> logEvents) {
         String sql = "INSERT INTO logs (timestamp, level, service, host, message, metadata, created_at) " +
-                     "VALUES (?, ?, ?, ?, ?, ?::jsonb, NOW())";
-        
+                "VALUES (?, ?, ?, ?, ?, ?::jsonb, NOW())";
+
         jdbcTemplate.batchUpdate(sql, new BatchPreparedStatementSetter() {
             @Override
             public void setValues(PreparedStatement ps, int i) throws SQLException {
@@ -66,7 +66,7 @@ public class DataService {
                 ps.setString(5, event.getMessage());
                 ps.setString(6, toJson(event.getMetadata()));
             }
-            
+
             @Override
             public int getBatchSize() {
                 return logEvents.size();
@@ -74,14 +74,14 @@ public class DataService {
         });
 
         log.debug("Batch inserted {} logs", logEvents.size());
-        kafkaProducerService.sendLogsAsync(logEvents);
+        // kafkaProducerService.sendLogsAsync(logEvents);
     }
 
     @Transactional
     public void processActivity(ActivityEvent activityEvent) {
         String sql = "INSERT INTO events (event_id, timestamp, user_id, session_id, event_type, event_data, device, created_at) " +
-                     "VALUES (?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, NOW())";
-        
+                "VALUES (?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, NOW())";
+
         jdbcTemplate.update(sql,
                 activityEvent.getEventId(),
                 activityEvent.getTimestamp().toEpochMilli() / 1000.0,
@@ -92,14 +92,14 @@ public class DataService {
                 toJson(activityEvent.getDevice())
         );
 
-        kafkaProducerService.sendActivityAsync(activityEvent);
+        // kafkaProducerService.sendActivityAsync(activityEvent);
     }
 
     @Transactional
     public void processActivities(List<ActivityEvent> activityEvents) {
         String sql = "INSERT INTO events (event_id, timestamp, user_id, session_id, event_type, event_data, device, created_at) " +
-                     "VALUES (?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, NOW())";
-        
+                "VALUES (?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, NOW())";
+
         jdbcTemplate.batchUpdate(sql, new BatchPreparedStatementSetter() {
             @Override
             public void setValues(PreparedStatement ps, int i) throws SQLException {
@@ -112,7 +112,7 @@ public class DataService {
                 ps.setString(6, toJson(event.getEventData()));
                 ps.setString(7, toJson(event.getDevice()));
             }
-            
+
             @Override
             public int getBatchSize() {
                 return activityEvents.size();
@@ -120,6 +120,6 @@ public class DataService {
         });
 
         log.debug("Batch inserted {} events", activityEvents.size());
-        kafkaProducerService.sendActivitiesAsync(activityEvents);
+        // kafkaProducerService.sendActivitiesAsync(activityEvents);
     }
 }
