@@ -73,6 +73,153 @@
 ### 도커 컴포즈 시 구축되어있던 환경
 <img width="1817" height="978" alt="image" src="https://github.com/user-attachments/assets/cf327f4b-b409-460d-8f9d-3d996e1912c7" />
 
+### 분산 시스템을 써야되는 이유
+로그 데이터 10억건을 넣다가...터졌다...
+```azure
+==========================================
+  Write Performance 모니터링 - 2026. 01. 14. (수) 17:17:07 KST
+==========================================
+
+[1] Generator 상태
+
+[2] PostgreSQL 카운트
+
+[3] HDFS 카운트
+
+[4] Pod 상태
+NAME                           READY   STATUS                   RESTARTS       AGE
+backend-5df8b4ddb9-4k4tr       0/1     ErrImageNeverPull        0              154m
+backend-5df8b4ddb9-qb7v4       0/1     Error                    0              7h21m
+datanode-0                     1/1     Running                  0              42h
+datanode-1                     1/1     Running                  0              42h
+generator-cc9975748-75vph      0/1     Completed                0              42h
+generator-cc9975748-djczz      0/1     ErrImageNeverPull        0              154m
+postgres-77f8dc74bc-279cg      0/1     Completed                0              42h
+postgres-77f8dc74bc-dspqs      0/1     Pending                  0              154m
+spark-master-d66658684-58z8s   1/1     Running                  0              154m
+spark-master-d66658684-67tt4   0/1     Evicted                  0              154m
+spark-master-d66658684-6whk4   0/1     Evicted                  0              154m
+spark-master-d66658684-84cb4   0/1     Evicted                  0              154m
+spark-master-d66658684-9hgn6   0/1     Evicted                  0              154m
+spark-master-d66658684-9jb8p   0/1     Evicted                  0              154m
+spark-master-d66658684-9jp6f   0/1     Evicted                  0              154m
+spark-master-d66658684-cnzll   0/1     Evicted                  0              154m
+spark-master-d66658684-fvvkr   0/1     Evicted                  0              154m
+spark-master-d66658684-ggkqj   0/1     Evicted                  0              154m
+spark-master-d66658684-hdgd8   0/1     Evicted                  0              154m
+spark-master-d66658684-hhm28   0/1     Evicted                  0              154m
+spark-master-d66658684-jgdkh   0/1     Evicted                  0              154m
+spark-master-d66658684-jrsw9   0/1     Evicted                  0              154m
+spark-master-d66658684-mv2f9   0/1     Evicted                  0              154m
+spark-master-d66658684-qcqgt   0/1     Evicted                  0              154m
+spark-master-d66658684-r4qj5   0/1     Evicted                  0              154m
+spark-master-d66658684-tdvg5   0/1     Evicted                  0              154m
+spark-master-d66658684-v2rwx   0/1     Error                    0              42h
+spark-master-d66658684-vgm6t   0/1     Evicted                  0              154m
+spark-master-d66658684-vk6hl   0/1     Evicted                  0              154m
+spark-master-d66658684-wm5zg   0/1     Evicted                  0              154m
+spark-master-d66658684-xp2cd   0/1     Evicted                  0              154m
+spark-master-d66658684-z22vj   0/1     Evicted                  0              154m
+spark-master-d66658684-zlgv6   0/1     Evicted                  0              154m
+spark-worker-5w552             1/1     Running                  1 (143m ago)   42h
+
+    
+```
+위와 같이 데이터를 넣다가 하드 용량 문제로 인해 모든 서버가 죽은 것을 볼 수 있다.
+심지어 현재 이 상황은 ssd에서 로그 데이터 7억건정도의 규모밖에 안되는 상황에서 발생했다.
+
+```
+jun@jun-Victus-by-HP-Gaming-Laptop-16-r0xxx:~/project/distributed-log-pipeline/backend$ df -h
+파일 시스템     크기  사용  가용 사용% 마운트위치
+tmpfs           3.7G  3.7M  3.7G    1% /run
+/dev/nvme0n1p2  468G  414G   30G   94% /
+tmpfs            19G  163M   19G    1% /dev/shm
+tmpfs           5.0M   12K  5.0M    1% /run/lock
+efivarfs        192K  180K  7.9K   96% /sys/firmware/efi/efivars
+/dev/nvme0n1p1  1.1G  6.2M  1.1G    1% /boot/efi
+tmpfs           3.7G   16M  3.7G    1% /run/user/1000
+/dev/sda1       932G  816G  116G   88% /media/jun/SAMSUNG
+
+(base) jun@jun-Victus-by-HP-Gaming-Laptop-16-r0xxx:~/project/distributed-log-pipeline/backend$ sudo du -sh /var/lib/rancher/k3s/storage/pvc-094a3944-30c7-4c84-887d-24134d68796e_log-pipeline_postgres-pvc/
+326G	/var/lib/rancher/k3s/storage/pvc-094a3944-30c7-4c84-887d-24134d68796e_log-pipeline_postgres-pvc/
+
+
+```
+
+원인은 당연히 디스크 임계치 오류로 인한 다운이다.
+```azure
+(base) jun@jun-Victus-by-HP-Gaming-Laptop-16-r0xxx:~$ kubectl get events -n log-pipeline --sort-by='.lastTimestamp' | tail -50
+LAST SEEN   TYPE      REASON              OBJECT                           MESSAGE
+11m         Warning   FailedScheduling    pod/namenode-cb9755c7-qffqt      0/3 nodes are available: 1 node(s) had untolerated taint(s), 2 node(s) didn't match PersistentVolume's node affinity. no new claims to deallocate, preemption: 0/3 nodes are available: 3 Preemption is not helpful for scheduling.
+11m         Warning   FailedScheduling    pod/postgres-77f8dc74bc-dspqs    0/3 nodes are available: 1 node(s) had untolerated taint(s), 2 node(s) didn't match PersistentVolume's node affinity. no new claims to deallocate, preemption: 0/3 nodes are available: 3 Preemption is not helpful for scheduling.
+89s         Warning   ErrImageNeverPull   pod/generator-cc9975748-djczz    Container image "log-pipeline-generator:latest" is not present with pull policy of Never
+83s         Warning   ErrImageNeverPull   pod/query-api-5f6d49db5f-g5np9   Container image "log-pipeline-api:latest" is not present with pull policy of Never
+81s         Warning   ErrImageNeverPull   pod/backend-5df8b4ddb9-4k4tr     Container image "log-pipeline-backend:latest" is not present with pull policy of Never
+(base) jun@jun-Victus-by-HP-Gaming-Laptop-16-r0xxx:~$ kubectl describe node | grep -A 10 "Conditions"
+Conditions:
+  Type             Status  LastHeartbeatTime                 LastTransitionTime                Reason                       Message
+  ----             ------  -----------------                 ------------------                ------                       -------
+  MemoryPressure   False   Wed, 14 Jan 2026 16:42:35 +0900   Mon, 12 Jan 2026 10:07:13 +0900   KubeletHasSufficientMemory   kubelet has sufficient memory available
+  DiskPressure     False   Wed, 14 Jan 2026 16:42:35 +0900   Mon, 12 Jan 2026 10:07:13 +0900   KubeletHasNoDiskPressure     kubelet has no disk pressure
+  PIDPressure      False   Wed, 14 Jan 2026 16:42:35 +0900   Mon, 12 Jan 2026 10:07:13 +0900   KubeletHasSufficientPID      kubelet has sufficient PID available
+  Ready            True    Wed, 14 Jan 2026 16:42:35 +0900   Mon, 12 Jan 2026 10:07:13 +0900   KubeletReady                 kubelet is posting ready status
+Addresses:
+  InternalIP:  192.168.55.158
+  Hostname:    jun
+Capacity:
+--
+Conditions:
+  Type             Status  LastHeartbeatTime                 LastTransitionTime                Reason                       Message
+  ----             ------  -----------------                 ------------------                ------                       -------
+  MemoryPressure   False   Wed, 14 Jan 2026 16:40:46 +0900   Mon, 12 Jan 2026 10:07:17 +0900   KubeletHasSufficientMemory   kubelet has sufficient memory available
+  DiskPressure     False   Wed, 14 Jan 2026 16:40:46 +0900   Wed, 14 Jan 2026 02:15:28 +0900   KubeletHasNoDiskPressure     kubelet has no disk pressure
+  PIDPressure      False   Wed, 14 Jan 2026 16:40:46 +0900   Mon, 12 Jan 2026 10:07:17 +0900   KubeletHasSufficientPID      kubelet has sufficient PID available
+  Ready            True    Wed, 14 Jan 2026 16:40:46 +0900   Mon, 12 Jan 2026 10:07:17 +0900   KubeletReady                 kubelet is posting ready status
+Addresses:
+  InternalIP:  192.168.55.9
+  Hostname:    jun-mini1
+Capacity:
+--
+Conditions:
+  Type             Status  LastHeartbeatTime                 LastTransitionTime                Reason                       Message
+  ----             ------  -----------------                 ------------------                ------                       -------
+  MemoryPressure   False   Wed, 14 Jan 2026 16:40:46 +0900   Mon, 12 Jan 2026 10:04:07 +0900   KubeletHasSufficientMemory   kubelet has sufficient memory available
+  DiskPressure     True    Wed, 14 Jan 2026 16:40:46 +0900   Wed, 14 Jan 2026 14:42:27 +0900   KubeletHasDiskPressure       kubelet has disk pressure
+  PIDPressure      False   Wed, 14 Jan 2026 16:40:46 +0900   Mon, 12 Jan 2026 10:04:07 +0900   KubeletHasSufficientPID      kubelet has sufficient PID available
+  Ready            True    Wed, 14 Jan 2026 16:40:46 +0900   Mon, 12 Jan 2026 10:04:07 +0900   KubeletReady                 kubelet is posting ready status
+Addresses:
+  InternalIP:  192.168.55.114
+  Hostname:    jun-Victus-by-HP-Gaming-Laptop-16-r0xxx
+Capacity:
+(base) jun@jun-Victus-by-HP-Gaming-Laptop-16-r0xxx:~$ 
+(base) jun@jun-Victus-by-HP-Gaming-Laptop-16-r0xxx:~$ kubectl describe pod spark-master-d66658684-67tt4 -n log-pipeline | grep -A 5 "Status\|Reason\|Message"
+Status:           Failed
+Reason:           Evicted
+Message:          Pod was rejected: The node had condition: [DiskPressure]. 
+IP:               
+IPs:              <none>
+Controlled By:    ReplicaSet/spark-master-d66658684
+Containers:
+  spark-master:
+
+```
+
+```azure
+Digest: sha256:42283dfbd8b955b4ddf43b6df49356ee2cf10a5957839a0e8d1b568c38b54fc2
+Status: Downloaded newer image for postgres:15
+0ea3dd77a9f2c6656f5a28d02f5c7faf005f8e6d99a5c2ed1505841832b9f99e
+Error response from daemon: container 0ea3dd77a9f2c6656f5a28d02f5c7faf005f8e6d99a5c2ed1505841832b9f99e is not running
+(base) jun@jun-Victus-by-HP-Gaming-Laptop-16-r0xxx:~/project/distributed-log-pipeline/backend$ 
+
+```
+# 결론
+여기서 알 수 있는 것은 고작 몇억건의 로그데이터의 용량은 362G라는 점과
+기본적으로 각 PC 자체에 연결 할 수 있는 하드는 무한하지 않으며
+이때문에 분산처리로 데이터를 넣어야하고 포스트그레는 인덱스 탐색, 포인터 점프 방식임으로
+ssd가 아닌 hdd에서는 재성능을 내기 힘든데 hdd에서는 spack와 하눕이 강하며
+로그 같은 데이터는 목록 조회보다는 통계성 연산결과가 중요하고 실 조회보단 통계에 강해야된다는 점을 고려했을때
+일반 SSD가 아닌 hdd에 넣어야됨은 물론 비용적인 측면에서도 SSD는 너무 비싸고 용량대비 가성비도 안나온다.
+그렇기에 hdd환경에 더 빠르고 처리방식이 좋은 스파크와 하눕을 쓰고 로그데이터를 수집하는게 맞을 꺼 같다는 결론이다.
 
 ---
 
